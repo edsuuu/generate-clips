@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Auto Post API" type="PythonConfigurationType" factoryName="Python">
+    <module name="auto-post" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/run_pycharm.py" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="SDK_HOME" value="" />
+    <envs>
+      <env name="AUTO_POST_RUN_MODE" value="serve" />
+    </envs>
+    <method v="2" />
+  </configuration>
+</component>

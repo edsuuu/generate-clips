@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     whisper_initial_prompt: str = ""
 
     output_dir: Path = Path("./output")
+    temp_dir: Path = Path("/tmp/auto-post")
+    storage_disk: str = "minio"
+    minio_endpoint: str = "http://127.0.0.1:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_bucket: str = "auto-post"
+    minio_secure: bool = False
+    python_api_token: str = ""
+
     max_cut_duration: int = 80
     min_cut_duration: int = 60
     min_cuts: int = 6
@@ -49,6 +58,15 @@ class Settings(BaseSettings):
 
     api_host: str = "0.0.0.0"
     api_port: int = 8765
+    webhook_timeout_seconds: float = 30.0
+    webhook_fail_job_on_error: bool = False
+
+    ffmpeg_encoder: str = "auto"
+    ffmpeg_crf: int = 23
+    ffmpeg_preset: str = "veryfast"
+    ffmpeg_video_bitrate: str = "5M"
+    ffmpeg_nvenc_preset: str = "p4"
+    ffmpeg_max_concurrent_renders: int = 1
 
     @property
     def database_url(self) -> str:

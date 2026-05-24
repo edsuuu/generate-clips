@@ -1,12 +1,12 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## O que o projeto faz
 
 Pipeline em Python que baixa um vídeo do YouTube, transcreve com Whisper, valida a transcrição cruzando com o áudio via Gemini multimodal, seleciona os melhores momentos com LLM, corta com **face tracking + active speaker detection** (crop dinâmico 9:16), queima legendas estilo TikTok e gera título/descrição/hashtags. Roda como CLI (`main.py process URL`) ou como API HTTP com SSE + WebSocket (`main.py serve`).
 
-Este repositório é **só Python** — não tem código Laravel e **não recriar** a menos que o usuário peça explicitamente. Na operação real, um app Laravel externo é o **orquestrador e dono do banco**: ele chama os endpoints granulares da API, e o Python roda **stateless** (sem banco), só executando as etapas, gravando em MinIO/disco e devolvendo o resultado via callback. O CLI (`main.py process`) roda o pipeline completo localmente, sem precisar de Laravel nem MinIO.
+A camada Laravel foi removida — **não recriar** a menos que o usuário peça explicitamente. Foco é só Python.
 
 ## Comandos comuns
 
@@ -18,8 +18,11 @@ Sempre rodar com o venv local — o `.venv/bin/pip` pode ter shebang quebrado po
 .venv/bin/python main.py process URL --no-validate --no-subtitles --no-face-tracking  # modo rápido para debug
 .venv/bin/python main.py process URL --subtitle-only                                    # só legenda o vídeo inteiro
 
-# API HTTP (porta 8765 default) — sem banco, stateless
+# API HTTP (porta 8765 default)
 .venv/bin/python main.py serve
+
+# Subir DB schema (cria tabelas se não existirem)
+.venv/bin/python -c "from app.db import init_db; init_db()"
 
 # Validar imports após mexer em algum módulo
 .venv/bin/python -c "from app.pipeline.runner import PipelineRunner; from app.api.main import app; print('ok')"
@@ -27,16 +30,17 @@ Sempre rodar com o venv local — o `.venv/bin/pip` pode ter shebang quebrado po
 # Reiniciar API quando travar a porta
 lsof -ti :8765 | xargs kill -9; .venv/bin/python main.py serve
 
-# Acompanhar job via SSE (o job_id volta no 202 do endpoint que disparou)
-curl -sN http://localhost:8765/jobs/<job_id>/events
+# Acompanhar job via SSE
+curl -sN http://localhost:8765/jobs/<id>/events
+
+# Status pontual
+curl http://localhost:8765/jobs/<id>
 ```
 
-A API **não usa banco**. Persistência fica em arquivos locais (`output/`) + MinIO. Para o modo API, MinIO precisa estar acessível (default `http://127.0.0.1:9000`, bucket `auto-post`):
+MySQL roda em Docker (container `mysql_container`, porta 3306, root/root). Database `auto_post` precisa existir:
 
 ```bash
-docker run -d -p 9000:9000 -p 9001:9001 --name minio \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data --console-address ":9001"
+docker exec mysql_container mysql -uroot -proot -e "CREATE DATABASE IF NOT EXISTS auto_post CHARACTER SET utf8mb4;"
 ```
 
 Ollama (fallback do `auto` provider) precisa estar rodando para o fallback funcionar:
@@ -48,12 +52,9 @@ ollama list          # confere que tem gemma2:9b
 
 ## Arquitetura — o que precisa entender para ser produtivo
 
-Existem **dois orquestradores**, mas ambos reusam as **mesmas classes de etapa** em `app/pipeline/` (`Downloader`, `Transcriber`, `Analyzer`, `FaceTracker`, `Cutter`, `Subtitler`) — não duplique lógica de etapa fora desses módulos:
+O coração é o **`PipelineRunner`** em `app/pipeline/runner.py`. Ele orquestra TODAS as etapas e emite `ProgressEvent(stage, percent, message, detail)` em cada passo. CLI e API consomem o **mesmo runner** — não duplique lógica de pipeline no `main.py` ou em `app/api/`.
 
-- **CLI** (`main.py process`) → **`PipelineRunner`** em `app/pipeline/runner.py`. Roda o pipeline completo end-to-end, grava em `output/` e emite `ProgressEvent(stage, percent, message, detail)` a cada passo.
-- **API** (`main.py serve`) → workflows granulares em **`app/pipeline/workflows/video.py`** (`ingest_video`, `recommend_cuts`, `render_cuts`, `subtitle_full_video`). Cada um faz uma fatia do pipeline, sobe artefatos pro MinIO e dispara callback. **Não** passam pelo `PipelineRunner`.
-
-Ordem das etapas no `PipelineRunner` (com pesos no progresso 0–100): `download(5) → transcribe(22) → validate(5) → analyze(3) → face_track(15) → cut(15) → subtitle(20) → metadata(15)`. Se mexer em alguma etapa, atualize `WEIGHTS` em `runner.py` para o `percent` continuar somando 100.
+Ordem das etapas (com pesos no progresso 0–100): `download(5) → transcribe(22) → validate(5) → analyze(3) → face_track(15) → cut(15) → subtitle(20) → metadata(15)`. Se mexer em alguma etapa, atualize `WEIGHTS` em `runner.py` para o `percent` continuar somando 100.
 
 ### Camadas independentes
 

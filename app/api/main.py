@@ -1,24 +1,43 @@
-"""FastAPI app — endpoints REST + SSE + WebSocket."""
+"""FastAPI app — microsserviço stateless de processamento de vídeo.
+
+O Python NÃO persiste nada em banco. O Laravel é o dono do banco e da
+orquestração. Aqui só processamos arquivos, salvamos no MinIO e devolvemos
+resultados via webhook/callback. Progresso em tempo real é relay em memória
+(SSE/WebSocket), sem persistência.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
-from sqlalchemy.orm import Session
 
-from app.api.jobs import bus, create_job
-from app.api.schemas import JobCreate, JobOut
-from app.db.models import Job
-from app.db.session import get_session, init_db
+from app.api.events import bus
+from app.api.schemas import (
+    AcceptedJobOut,
+    IngestVideoRequest,
+    RecommendCutsRequest,
+    RenderCutsRequest,
+    SubtitleFullRequest,
+)
+from app.pipeline.workflows import (
+    ingest_video,
+    recommend_cuts,
+    render_cuts,
+    subtitle_full_video,
+)
+from app.pipeline.workflows.video import new_job_id
+from app.support.config import settings
+from app.support.logger import logger
 
 app = FastAPI(
     title="auto-post API",
-    version="0.3.0",
-    description="API para enfileirar processamento de vídeos e acompanhar progresso.",
+    version="0.4.0",
+    description="Microsserviço stateless de processamento de vídeo (orquestrado pelo Laravel).",
 )
 
 app.add_middleware(
@@ -30,73 +49,86 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.post("/jobs", response_model=JobOut, status_code=202)
-def post_job(payload: JobCreate, db: Session = Depends(get_session)) -> JobOut:
-    """Cria um job e retorna imediatamente (202). O pipeline roda em background.
-
-    Use GET /jobs/{id} para status pontual,
-    GET /jobs/{id}/events para SSE,
-    WS /jobs/{id}/ws para WebSocket.
-
-    Se webhook_url for fornecido, o servidor faz POST com o resultado ao concluir,
-    enviando webhook_token no header webhook_header (default: Authorization).
-    """
-    job_id = create_job(payload)
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=500, detail="Falha ao criar job")
-    return JobOut.model_validate(job)
+def _require_python_token(authorization: str | None = Header(default=None)) -> None:
+    if not settings.python_api_token:
+        return
+    accepted = {settings.python_api_token, f"Bearer {settings.python_api_token}"}
+    if authorization not in accepted:
+        raise HTTPException(status_code=401, detail="Token invalido")
 
 
-@app.get("/jobs/{job_id}", response_model=JobOut)
-def get_job(job_id: str, db: Session = Depends(get_session)) -> JobOut:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job não encontrado")
-    return JobOut.model_validate(job)
+def _run_background(target, *args) -> str:
+    job_id = new_job_id()
+
+    def runner() -> None:
+        try:
+            target(job_id, *args)
+        except Exception:
+            logger.exception(f"Workflow {job_id} falhou")
+
+    threading.Thread(target=runner, daemon=True).start()
+    return job_id
 
 
-@app.get("/jobs", response_model=list[JobOut])
-def list_jobs(limit: int = 50, db: Session = Depends(get_session)) -> list[JobOut]:
-    jobs = db.query(Job).order_by(Job.created_at.desc()).limit(limit).all()
-    return [JobOut.model_validate(j) for j in jobs]
+@app.post(
+    "/videos/ingest",
+    response_model=AcceptedJobOut,
+    status_code=202,
+    dependencies=[Depends(_require_python_token)],
+)
+def post_video_ingest(payload: IngestVideoRequest) -> AcceptedJobOut:
+    job_id = _run_background(ingest_video, payload)
+    return AcceptedJobOut(job_id=job_id)
+
+
+@app.post(
+    "/videos/{video_id}/subtitle-full",
+    response_model=AcceptedJobOut,
+    status_code=202,
+    dependencies=[Depends(_require_python_token)],
+)
+def post_subtitle_full(video_id: str, payload: SubtitleFullRequest) -> AcceptedJobOut:
+    job_id = _run_background(subtitle_full_video, video_id, payload)
+    return AcceptedJobOut(job_id=job_id)
+
+
+@app.post(
+    "/videos/{video_id}/recommend-cuts",
+    dependencies=[Depends(_require_python_token)],
+)
+def post_recommend_cuts(video_id: str, payload: RecommendCutsRequest):
+    # Síncrono: a recomendação via LLM é rápida e o Laravel quer a resposta na hora.
+    return recommend_cuts(video_id, payload)
+
+
+@app.post(
+    "/videos/{video_id}/render-cuts",
+    response_model=AcceptedJobOut,
+    status_code=202,
+    dependencies=[Depends(_require_python_token)],
+)
+def post_render_cuts(video_id: str, payload: RenderCutsRequest) -> AcceptedJobOut:
+    job_id = _run_background(render_cuts, video_id, payload)
+    return AcceptedJobOut(job_id=job_id)
 
 
 @app.get("/jobs/{job_id}/events")
-async def job_events(job_id: str, db: Session = Depends(get_session)):
-    """Server-Sent Events — emite cada evento de progresso conforme acontece.
+async def job_events(job_id: str):
+    """SSE — progresso em tempo real do job (relay em memória, sem DB).
 
-    O cliente pode usar EventSource(url) (JS) ou `curl -N <url>`.
-    Fecha o stream automaticamente quando o job atinge estado terminal.
+    Cliente: EventSource(url) no browser ou `curl -N <url>`.
     """
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job não encontrado")
-
     queue = bus.subscribe(job_id)
 
     async def event_generator():
-        # Snapshot inicial
-        yield {
-            "event": "snapshot",
-            "data": json.dumps({
-                "job_id": job_id,
-                "stage": job.stage,
-                "percent": job.progress,
-                "message": job.message,
-                "status": job.status,
-            }),
-        }
+        snap = bus.snapshot(job_id)
+        if snap is not None:
+            yield {"event": "snapshot", "data": json.dumps(snap)}
         try:
             while True:
                 try:
@@ -116,22 +148,10 @@ async def job_events(job_id: str, db: Session = Depends(get_session)):
 @app.websocket("/jobs/{job_id}/ws")
 async def job_ws(websocket: WebSocket, job_id: str):
     await websocket.accept()
-    with next(get_session()) as db:
-        job = db.get(Job, job_id)
 
-    if job is None:
-        await websocket.send_json({"error": "Job não encontrado"})
-        await websocket.close(code=1008)
-        return
-
-    await websocket.send_json({
-        "type": "snapshot",
-        "job_id": job_id,
-        "stage": job.stage,
-        "percent": job.progress,
-        "message": job.message,
-        "status": job.status,
-    })
+    snap = bus.snapshot(job_id)
+    if snap is not None:
+        await websocket.send_json({"type": "snapshot", **snap})
 
     queue = bus.subscribe(job_id)
     try:
@@ -141,9 +161,7 @@ async def job_ws(websocket: WebSocket, job_id: str):
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "ping"})
                 continue
-
-            event["type"] = "progress"
-            await websocket.send_json(event)
+            await websocket.send_json({"type": "progress", **event})
             if event.get("stage") in {"done", "error"}:
                 break
     except WebSocketDisconnect:

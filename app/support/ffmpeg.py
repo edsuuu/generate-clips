@@ -1,0 +1,252 @@
+"""Helpers para renderizar com ffmpeg com encoder, logs e throttling local."""
+
+from __future__ import annotations
+
+import os
+import platform
+import re
+import shlex
+import subprocess
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+
+from app.support.config import settings
+from app.support.logger import logger
+
+_OUT_TIME_RE = re.compile(r"out_time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+_RENDER_SLOT_DIR = settings.temp_dir / "ffmpeg-render-slots"
+
+
+@dataclass(frozen=True)
+class VideoEncodeProfile:
+    encoder: str
+    args: tuple[str, ...]
+
+
+def build_video_encode_profile() -> VideoEncodeProfile:
+    requested = settings.ffmpeg_encoder.strip().lower() or "auto"
+
+    if requested == "auto":
+        if platform.system() == "Darwin" and _supports_encoder("h264_videotoolbox"):
+            return VideoEncodeProfile(
+                encoder="h264_videotoolbox",
+                args=("-c:v", "h264_videotoolbox", "-b:v", settings.ffmpeg_video_bitrate),
+            )
+        if platform.system() == "Windows" and _supports_encoder("h264_nvenc"):
+            return _nvenc_profile()
+        return _libx264_profile()
+
+    if requested == "h264_videotoolbox":
+        if _supports_encoder("h264_videotoolbox"):
+            return VideoEncodeProfile(
+                encoder="h264_videotoolbox",
+                args=("-c:v", "h264_videotoolbox", "-b:v", settings.ffmpeg_video_bitrate),
+            )
+        logger.warning(
+            "FFMPEG_ENCODER=h264_videotoolbox, mas o encoder nao esta disponivel. "
+            "Caindo para libx264."
+        )
+        return _libx264_profile()
+
+    if requested == "h264_nvenc":
+        if _supports_encoder("h264_nvenc"):
+            return _nvenc_profile()
+        logger.warning(
+            "FFMPEG_ENCODER=h264_nvenc, mas o encoder nao esta disponivel. "
+            "Caindo para libx264."
+        )
+        return _libx264_profile()
+
+    if requested == "libx264":
+        return _libx264_profile()
+
+    logger.warning(
+        f"FFMPEG_ENCODER={settings.ffmpeg_encoder!r} nao reconhecido. "
+        "Usando fallback libx264."
+    )
+    return _libx264_profile()
+
+
+def _libx264_profile() -> VideoEncodeProfile:
+    return VideoEncodeProfile(
+        encoder="libx264",
+        args=(
+            "-c:v",
+            "libx264",
+            "-preset",
+            settings.ffmpeg_preset,
+            "-crf",
+            str(settings.ffmpeg_crf),
+        ),
+    )
+
+
+def _nvenc_profile() -> VideoEncodeProfile:
+    return VideoEncodeProfile(
+        encoder="h264_nvenc",
+        args=(
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            settings.ffmpeg_nvenc_preset,
+            "-b:v",
+            settings.ffmpeg_video_bitrate,
+        ),
+    )
+
+
+@lru_cache(maxsize=1)
+def _available_encoders() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        logger.warning("ffmpeg nao encontrado ao detectar encoders; usando fallback libx264.")
+        return set()
+
+    output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    encoders: set[str] = set()
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("Encoders:", "--")):
+            continue
+        match = re.match(r"^[A-Z\\.]{6}\s+([^\s]+)", stripped)
+        if match:
+            encoders.add(match.group(1))
+    return encoders
+
+
+def _supports_encoder(name: str) -> bool:
+    return name in _available_encoders()
+
+
+def _io_summary(cmd: list[str]) -> tuple[list[str], str]:
+    inputs: list[str] = []
+    for idx, token in enumerate(cmd[:-1]):
+        if token == "-i" and idx + 1 < len(cmd):
+            inputs.append(cmd[idx + 1])
+    output = cmd[-1] if cmd else ""
+    return inputs, output
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _clear_stale_slot(slot_path: Path) -> None:
+    try:
+        payload = slot_path.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return
+
+    if not payload:
+        slot_path.unlink(missing_ok=True)
+        return
+
+    try:
+        pid = int(payload[0])
+    except ValueError:
+        slot_path.unlink(missing_ok=True)
+        return
+
+    if not _is_pid_alive(pid):
+        slot_path.unlink(missing_ok=True)
+
+
+def _acquire_render_slot() -> tuple[Path, int, float]:
+    _RENDER_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    max_slots = max(1, settings.ffmpeg_max_concurrent_renders)
+    wait_start = time.monotonic()
+
+    while True:
+        for slot_index in range(max_slots):
+            slot_path = _RENDER_SLOT_DIR / f"slot-{slot_index}.lock"
+            try:
+                fd = os.open(slot_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                _clear_stale_slot(slot_path)
+                continue
+
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(f"{os.getpid()}\n{datetime.now().isoformat(timespec='seconds')}\n")
+
+            wait_seconds = time.monotonic() - wait_start
+            return slot_path, slot_index, wait_seconds
+
+        time.sleep(0.25)
+
+
+def run_with_progress(
+    cmd: list[str],
+    total_seconds: float,
+    on_progress: Callable[[float], None] | None = None,
+    cwd: Path | str | None = None,
+    encoder: str | None = None,
+    stage: str = "render",
+) -> None:
+    """Roda ffmpeg e chama on_progress(percent 0-100) conforme avanca."""
+
+    full = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    inputs, output = _io_summary(cmd)
+    selected_encoder = encoder or "desconhecido"
+    slot_path, slot_index, wait_seconds = _acquire_render_slot()
+    try:
+        started_at = datetime.now().isoformat(timespec="seconds")
+        render_start = time.monotonic()
+        logger.info(
+            f"[ffmpeg:{stage}] inicio={started_at} encoder={selected_encoder} "
+            f"slot={slot_index} fila={wait_seconds:.2f}s input={inputs or ['?']} "
+            f"output={output} cmd={shlex.join(cmd)}"
+        )
+
+        proc = subprocess.Popen(
+            full,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=str(cwd) if cwd else None,
+        )
+
+        last_pct = -1.0
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            match = _OUT_TIME_RE.search(line)
+            if match and total_seconds > 0 and on_progress is not None:
+                h, m, s = match.groups()
+                current = int(h) * 3600 + int(m) * 60 + float(s)
+                pct = min(99.0, current / total_seconds * 100.0)
+                if pct - last_pct >= 1.0:
+                    last_pct = pct
+                    on_progress(pct)
+            elif line.startswith("progress=end") and on_progress is not None:
+                on_progress(100.0)
+
+        returncode = proc.wait()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        finished_at = datetime.now().isoformat(timespec="seconds")
+        elapsed = time.monotonic() - render_start
+
+        logger.info(
+            f"[ffmpeg:{stage}] fim={finished_at} duracao={elapsed:.2f}s "
+            f"encoder={selected_encoder} slot={slot_index} output={output} exit={returncode}"
+        )
+
+        if returncode != 0:
+            raise RuntimeError(f"ffmpeg falhou (exit {returncode}):\n{stderr[-1500:]}")
+    finally:
+        slot_path.unlink(missing_ok=True)

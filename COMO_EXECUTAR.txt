@@ -1,0 +1,53 @@
+AUTO-POST - COMO EXECUTAR
+
+1. Terminal
+
+API HTTP:
+.venv/bin/python main.py serve
+
+Processar um video:
+.venv/bin/python main.py process "https://www.youtube.com/watch?v=SEU_VIDEO"
+
+Modo mais rapido para debug:
+.venv/bin/python main.py process "https://www.youtube.com/watch?v=SEU_VIDEO" --no-validate --no-subtitles --no-face-tracking
+
+Gerar apenas o video completo legendado:
+.venv/bin/python main.py process "https://www.youtube.com/watch?v=SEU_VIDEO" --subtitle-only
+
+
+2. PyCharm - botao Play
+
+Arquivo launcher:
+run_pycharm.py
+
+Ele foi feito para o PyCharm rodar direto no Play.
+
+Default:
+- sobe a API HTTP
+
+Se quiser processar um video pelo Play, configure variaveis de ambiente na Run Configuration:
+
+AUTO_POST_RUN_MODE=process
+AUTO_POST_URL=https://www.youtube.com/watch?v=SEU_VIDEO
+
+Variaveis opcionais uteis:
+AUTO_POST_LLM=auto
+AUTO_POST_NO_VALIDATE=true
+AUTO_POST_NO_SUBTITLES=true
+AUTO_POST_NO_FACE_TRACKING=true
+AUTO_POST_SUBTITLE_ONLY=true
+AUTO_POST_JSON_RESULT=output/resultado.json
+
+
+3. Run Configuration pronta
+
+Se o PyCharm carregar a pasta .idea normalmente, a configuracao "Auto Post API"
+ja fica pronta para subir a API clicando no Play.
+
+
+4. Observacoes
+
+- Use sempre o Python da pasta .venv do projeto.
+- Se a porta 8765 estiver ocupada, finalize o processo antigo antes:
+  lsof -ti :8765 | xargs kill -9
+- O launcher do PyCharm usa AUTO_POST_RUN_MODE=serve por padrao.

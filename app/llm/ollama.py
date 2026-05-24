@@ -1,6 +1,6 @@
 import httpx
 
-from app.llm.base import LLMProvider
+from app.llm import LLMProvider
 from app.support.config import settings
 
 

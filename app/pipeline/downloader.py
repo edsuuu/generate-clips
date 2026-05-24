@@ -39,7 +39,12 @@ class Downloader:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def download(self, url: str, video_format: str = BEST_QUALITY_FORMAT) -> VideoInfo:
+    def download(
+        self,
+        url: str,
+        video_format: str = BEST_QUALITY_FORMAT,
+        on_progress=None,
+    ) -> VideoInfo:
         # Atalho de cache: se conseguimos extrair o video_id da URL e já temos
         # o arquivo + metadata salvos, retorna sem bater no YouTube.
         guessed_id = _extract_video_id(url)
@@ -89,6 +94,9 @@ class Downloader:
                 {"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}
             ],
         }
+        if on_progress is not None:
+            ydl_opts["progress_hooks"] = [self._make_hook(on_progress)]
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
 
@@ -102,6 +110,17 @@ class Downloader:
             url=url, video_id=video_id, title=title,
             duration=duration, file_path=file_path,
         )
+
+    @staticmethod
+    def _make_hook(on_progress):
+        def hook(d: dict) -> None:
+            if d.get("status") != "downloading":
+                return
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            done = d.get("downloaded_bytes", 0)
+            if total:
+                on_progress(min(99.0, done / total * 100.0))
+        return hook
 
     @staticmethod
     def _find_existing(video_dir: Path) -> Path | None:

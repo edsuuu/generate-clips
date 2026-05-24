@@ -1,6 +1,6 @@
 """Provider Gemini via REST com rate limiting e cascata de fallback de modelos.
 
-- Aceita uma cascata de modelos (default: gemini-flash-latest → 2.5-flash-lite → 3.1-flash-lite).
+- Aceita uma cascata ampla de modelos de texto e distribui a carga entre eles.
 - Antes de cada chamada, consulta o RateLimiter: se passou do RPM/TPM, aguarda
   (até max_wait); se passou do RPD, marca o modelo como esgotado e tenta o próximo.
 - Em 429/5xx, faz backoff exponencial e/ou troca para o próximo modelo.
@@ -9,24 +9,19 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import httpx
 
-from app.llm.base import LLMProvider
-from app.llm.rate_limit import limiter
+from app.llm import LLMProvider
+from app.llm.gemini.models import TEXT_MODEL_POOL, build_model_cascade
+from app.llm.gemini.rate_limit import limiter
 from app.support.config import settings
 from app.support.logger import logger
 
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-
-# Cascata default — sobrescreva via env GEMINI_FALLBACK_MODELS=modeloA,modeloB
-DEFAULT_FALLBACKS = [
-    "gemini-2.5-flash-lite",
-    "gemini-3.1-flash-lite",
-]
-
 
 def _estimate_tokens(text: str) -> int:
     """Heurística: 1 token ≈ 4 chars (válido para PT-BR/EN)."""
@@ -47,24 +42,30 @@ class GeminiProvider(LLMProvider):
             raise ValueError("GEMINI_API_KEY não configurada")
         self.api_key = key
 
-        primary = model or settings.gemini_model
-
         if fallback_models is None:
             env_cascade = os.environ.get("GEMINI_FALLBACK_MODELS", "").strip()
             fallback_models = (
                 [m.strip() for m in env_cascade.split(",") if m.strip()]
-                if env_cascade else list(DEFAULT_FALLBACKS)
+                if env_cascade else None
             )
 
-        # Mantém ordem, sem duplicar o primário
-        self.models = [primary] + [m for m in fallback_models if m != primary]
+        primary = model or settings.gemini_model
+        self.models = build_model_cascade(primary, fallback_models, TEXT_MODEL_POOL)
         self._exhausted: set[str] = set()
+        self._rotation_index = 0
+        self._rotation_lock = threading.Lock()
 
     def complete(self, system: str, user: str, *, json_mode: bool = False) -> str:
         est_tokens = _estimate_tokens(system) + _estimate_tokens(user) + 2048
         last_error: Exception | None = None
+        if len(self._exhausted) >= len(self.models):
+            logger.warning("[gemini] todos os modelos estavam marcados como esgotados; resetando cache local.")
+            self._exhausted.clear()
 
-        for model in self.models:
+        ordered_models = self._ordered_models()
+        logger.info(f"[gemini] ordem desta chamada: {', '.join(ordered_models)}")
+
+        for model in ordered_models:
             if model in self._exhausted:
                 continue
 
@@ -104,6 +105,16 @@ class GeminiProvider(LLMProvider):
         raise RuntimeError(
             f"Todos os modelos Gemini falharam ou esgotaram cota. Último: {last_error}"
         )
+
+    def _ordered_models(self) -> list[str]:
+        if len(self.models) <= 1:
+            return list(self.models)
+
+        with self._rotation_lock:
+            start = self._rotation_index % len(self.models)
+            self._rotation_index += 1
+
+        return self.models[start:] + self.models[:start]
 
     def _call(self, model: str, system: str, user: str, *, json_mode: bool) -> str:
         url = f"{BASE_URL}/models/{model}:generateContent"

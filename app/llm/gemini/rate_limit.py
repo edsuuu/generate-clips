@@ -5,7 +5,8 @@ Mantém contadores em memória (sliding window) de RPM/TPM/RPD por modelo.
   ou indica que o modelo está esgotado (retorna False).
 - Após a chamada: `record(model, tokens_consumidos)` registra o uso real.
 
-Os limites default vêm da tabela de cotas free de 2026-05 (RPM/TPM/RPD).
+Os limites default vêm da tabela pública do Gemini API consultada em 2026-05-24
+(RPM/TPM/RPD) e podem ser sobrescritos para refletir a sua conta/projeto.
 Podem ser sobrescritos via env `GEMINI_LIMITS_JSON` se a cota mudar.
 """
 
@@ -19,34 +20,41 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.llm.gemini.models import normalize_model_name
 from app.support.logger import logger
 
 
-# Defaults baseados na tabela de cotas free Gemini.
+# Defaults baseados na tabela pública atual do Gemini API.
 # RPM = requests/minute, TPM = tokens/minute, RPD = requests/day
 DEFAULT_LIMITS: dict[str, dict[str, int]] = {
-    # Fast text models
-    "gemini-flash-latest":    {"rpm": 5,  "tpm": 250_000, "rpd": 20},
-    "gemini-3.5-flash":       {"rpm": 5,  "tpm": 250_000, "rpd": 20},
-    "gemini-3-flash":         {"rpm": 5,  "tpm": 250_000, "rpd": 20},
-    "gemini-2.5-flash":       {"rpm": 5,  "tpm": 250_000, "rpd": 20},
-    "gemini-2.0-flash":       {"rpm": 5,  "tpm": 250_000, "rpd": 20},
-    # Mais folgados (lite)
-    "gemini-3.1-flash-lite":  {"rpm": 15, "tpm": 250_000, "rpd": 500},
-    "gemini-2.5-flash-lite":  {"rpm": 10, "tpm": 250_000, "rpd": 20},
+    "gemini-flash-latest":       {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-pro":            {"rpm": 5,  "tpm": 250_000, "rpd": 100},
+    "gemini-2.5-flash":          {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-flash-preview":  {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-flash-lite":     {"rpm": 15, "tpm": 250_000, "rpd": 1_000},
+    "gemini-2.0-flash":          {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
+    "gemini-2.0-flash-lite":     {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
+    # Aliases praticos aceitos no projeto.
+    "gemini-2-flash":            {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
+    "gemini-2-flash-lite":       {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
 }
 
 
 def get_limits() -> dict[str, dict[str, int]]:
     """Lê os limites; permite override via env GEMINI_LIMITS_JSON."""
+    limits = {normalize_model_name(model): dict(values) for model, values in DEFAULT_LIMITS.items()}
     override = os.environ.get("GEMINI_LIMITS_JSON")
     if override:
         try:
             extra = json.loads(override)
-            return {**DEFAULT_LIMITS, **extra}
+            normalized_extra = {
+                normalize_model_name(model): values
+                for model, values in extra.items()
+            }
+            return {**limits, **normalized_extra}
         except Exception as e:
             logger.warning(f"GEMINI_LIMITS_JSON inválido ({e}). Usando defaults.")
-    return dict(DEFAULT_LIMITS)
+    return limits
 
 
 @dataclass
@@ -66,14 +74,16 @@ class GeminiRateLimiter:
         self._global_lock = threading.Lock()
 
     def _state(self, model: str) -> _ModelState:
+        model = normalize_model_name(model)
         with self._global_lock:
             if model not in self._states:
                 self._states[model] = _ModelState()
             return self._states[model]
 
     def _model_limits(self, model: str) -> dict[str, int]:
-        # match exato; senão fallback genérico (5/250K/20)
-        return self.limits.get(model, {"rpm": 5, "tpm": 250_000, "rpd": 20})
+        normalized = normalize_model_name(model)
+        # fallback genérico conservador
+        return self.limits.get(normalized, {"rpm": 5, "tpm": 250_000, "rpd": 20})
 
     def _cleanup(self, st: _ModelState, now: float) -> None:
         while st.requests_minute and now - st.requests_minute[0] > 60:
@@ -136,6 +146,7 @@ class GeminiRateLimiter:
             waited += wait
 
     def record(self, model: str, tokens_used: int) -> None:
+        model = normalize_model_name(model)
         st = self._state(model)
         now = time.monotonic()
         with st.lock:
@@ -149,7 +160,7 @@ class GeminiRateLimiter:
             if model is None:
                 self._states.clear()
             else:
-                self._states.pop(model, None)
+                self._states.pop(normalize_model_name(model), None)
 
 
 # Singleton

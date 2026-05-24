@@ -35,13 +35,10 @@ auto-post/
 │   │   └── metadata.py         # gera título + descrição + hashtags
 │   │
 │   ├── llm/                # ≈ app/Integrations — providers de IA
-│   │   ├── base.py             # contrato (interface abstrata)
-│   │   ├── factory.py          # seleciona provider por nome
+│   │   ├── __init__.py         # base + factory combinados
 │   │   ├── auto.py             # tenta Gemini, fallback para local
-│   │   ├── gemini.py           # Google Gemini (REST direto)
 │   │   ├── ollama.py           # Ollama local
-│   │   ├── claude.py           # Anthropic Claude
-│   │   └── gpt.py              # OpenAI GPT
+│   │   └── gemini/             # subpacote Gemini (models, rate_limit, etc.)
 │   │
 │   ├── api/                # ≈ routes/ + controllers — FastAPI
 │   │   ├── main.py             # app + endpoints REST/SSE/WS
@@ -130,8 +127,6 @@ python main.py process URL --min-cuts 8 --max-cuts 25 --min-gap 1.5
 # Forçar provider de IA
 python main.py process URL --llm gemini       # Google Gemini
 python main.py process URL --llm local        # Ollama (gemma2:9b)
-python main.py process URL --llm claude
-python main.py process URL --llm gpt
 
 # Apenas legendar o vídeo inteiro (sem cortar)
 python main.py process URL --subtitle-only
@@ -289,9 +284,12 @@ Os cortes:
 
 | Variável | Default | Descrição |
 |---|---|---|
-| `LLM_PROVIDER` | `auto` | `auto` (Gemini→local), `gemini`, `local`, `claude`, `gpt` |
+| `LLM_PROVIDER` | `auto` | `auto` (Gemini→local), `gemini`, `local` |
 | `GEMINI_API_KEY` | — | Sua chave do Google AI Studio |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Modelo Gemini |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Modelo primário do Gemini |
+| `GEMINI_FALLBACK_MODELS` | vazio | Se vazio, gira entre `gemini-flash-latest`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`, `gemini-2.0-flash-lite` e `gemini-2.5-pro` |
+| `GEMINI_MULTIMODAL_FALLBACKS` | vazio | Cascata do validator de áudio; usa só modelos multimodais completos |
+| `GEMINI_LIMITS_JSON` | vazio | Override por projeto/conta dos limites RPM/TPM/RPD do Gemini |
 | `OLLAMA_MODEL` | `gemma2:9b` | Modelo Ollama (fallback local) |
 | `WHISPER_MODEL` | `large-v3` | Modelo Whisper |
 | `WHISPER_LANGUAGE` | `pt` | Idioma da transcrição |
@@ -300,9 +298,17 @@ Os cortes:
 | `MIN_GAP_BETWEEN_CUTS` | `1.0` | Gap mínimo entre cortes (s) |
 | `FACE_TRACKING_ENABLED` | `true` | Liga/desliga face tracking |
 | `FACE_TRACKING_SAMPLE_FPS` | `6` | Frames/segundo amostrados |
+| `FFMPEG_ENCODER` | `auto` | `h264_videotoolbox` no macOS, `h264_nvenc` no Windows/NVIDIA e fallback `libx264` |
+| `FFMPEG_CRF` | `23` | CRF usado no fallback `libx264` |
+| `FFMPEG_PRESET` | `veryfast` | Preset do fallback `libx264` |
+| `FFMPEG_VIDEO_BITRATE` | `5M` | Bitrate alvo do `h264_videotoolbox` |
+| `FFMPEG_NVENC_PRESET` | `p4` | Preset usado no encoder `h264_nvenc` |
+| `FFMPEG_MAX_CONCURRENT_RENDERS` | `1` | Máximo de renders FFmpeg simultâneos no processo local |
 | `DB_HOST` / `DB_PORT` | `127.0.0.1` / `3306` | MySQL |
 | `DB_DATABASE` / `DB_USER` / `DB_PASSWORD` | `auto_post` / `root` / `root` | MySQL |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8765` | Servidor HTTP |
+| `WEBHOOK_TIMEOUT_SECONDS` | `30` | Timeout do POST de callback/webhook |
+| `WEBHOOK_FAIL_JOB_ON_ERROR` | `false` | Se `true`, falha do webhook derruba o job; por padrão só loga warning |
 
 ---
 
@@ -314,7 +320,7 @@ Os cortes:
 4. **Analyzer** — LLM seleciona 6–20 melhores momentos (60–80s). Valida ordem temporal e gap mínimo, escolhe o de maior score em caso de conflito.
 5. **FaceTracker** — para cada highlight, amostra frames a 6fps, MediaPipe detecta faces + landmarks dos lábios, librosa mede energia do áudio. Decide o **speaker ativo** combinando movimento dos lábios × energia × tamanho da face. Suaviza trajetória com Savitzky-Golay.
 6. **Cutter** — render frame-a-frame com OpenCV usando a trajetória dinâmica; mux do áudio original via ffmpeg. Output 1080×1920 H.264.
-7. **Subtitler** — gera `.ass` com 3 palavras por frame (palavra ativa destacada em amarelo). ffmpeg queima via `subtitles=filename=...` (precisa libass).
+7. **Subtitler** — gera `.ass` com 3 palavras por frame (palavra ativa destacada em amarelo). ffmpeg queima via `subtitles=filename=...` (precisa libass), preferindo `h264_videotoolbox` no Mac, `h264_nvenc` em Windows com NVIDIA e caindo para `libx264 veryfast` quando necessário.
 8. **MetadataGenerator** — LLM gera título chamativo + descrição com emoji + 10–15 hashtags em PT-BR para cada corte.
 
 ---
@@ -328,7 +334,7 @@ Os cortes:
 5. **`app/pipeline/*.py`** — cada arquivo é uma etapa do pipeline.
 6. **`app/api/main.py`** — endpoints HTTP, SSE, WebSocket.
 7. **`app/api/jobs.py`** — worker async + pub/sub + webhook.
-8. **`app/llm/base.py`** + **`factory.py`** — como trocar de provider de IA.
+8. **`app/llm/__init__.py`** — interface de provider de IA e factory.
 
 ---
 

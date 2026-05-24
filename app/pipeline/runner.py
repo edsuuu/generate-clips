@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from app.llm.factory import get_provider
+from app.llm import get_provider
 from app.pipeline.analyzer import Analyzer
 from app.pipeline.cutter import Cutter
 from app.pipeline.downloader import Downloader

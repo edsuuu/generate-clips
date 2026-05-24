@@ -20,7 +20,7 @@ import os
 
 import httpx
 
-from app.llm.rate_limit import limiter as rate_limiter
+from app.llm.gemini import MULTIMODAL_MODEL_POOL, build_model_cascade, limiter as rate_limiter
 from app.support.config import settings
 from app.support.logger import logger
 from app.support.types import Segment, Transcript, Word
@@ -28,10 +28,6 @@ from app.support.types import Segment, Transcript, Word
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
-
-
-# Cascata só com modelos multimodais (aceitam áudio).
-MULTIMODAL_FALLBACKS = ["gemini-2.5-flash", "gemini-3-flash"]
 
 
 SYSTEM_PROMPT = """Você é um revisor de transcrição em português brasileiro.
@@ -85,9 +81,9 @@ class TranscriptValidator:
             env_cascade = os.environ.get("GEMINI_MULTIMODAL_FALLBACKS", "").strip()
             fallback_models = (
                 [m.strip() for m in env_cascade.split(",") if m.strip()]
-                if env_cascade else list(MULTIMODAL_FALLBACKS)
+                if env_cascade else None
             )
-        self.models = [primary] + [m for m in fallback_models if m != primary]
+        self.models = build_model_cascade(primary, fallback_models, MULTIMODAL_MODEL_POOL)
 
     def validate(self, audio_path: Path, transcript: Transcript) -> Transcript:
         """Retorna o Transcript corrigido. Se falhar, retorna o original."""

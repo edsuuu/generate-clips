@@ -7,12 +7,12 @@ Suporta dois modos:
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import cv2  # type: ignore
 import numpy as np
 
+from app.support.ffmpeg import build_video_encode_profile, run_with_progress
 from app.support.logger import logger
 from app.support.types import Cut, CropTrajectory, Highlight, VideoInfo
 
@@ -31,6 +31,7 @@ class Cutter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.vertical = vertical
         self.face_tracker = face_tracker
+        self.encode_profile = build_video_encode_profile()
 
     def cut_all(self, video: VideoInfo, highlights: list[Highlight]) -> list[Cut]:
         cuts: list[Cut] = []
@@ -72,14 +73,17 @@ class Cutter:
             "-ss", f"{highlight.start:.3f}",
             "-i", str(source),
             "-t", f"{highlight.duration:.3f}",
-            "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+            *self.encode_profile.args,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             str(out_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg falhou:\n{result.stderr}")
+        run_with_progress(
+            cmd,
+            total_seconds=highlight.duration,
+            encoder=self.encode_profile.encoder,
+            stage="cut-simple",
+        )
 
     def _cut_vertical_static(
         self, source: Path, highlight: Highlight, out_path: Path
@@ -94,14 +98,17 @@ class Cutter:
             "-i", str(source),
             "-t", f"{highlight.duration:.3f}",
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+            *self.encode_profile.args,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             str(out_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg falhou:\n{result.stderr}")
+        run_with_progress(
+            cmd,
+            total_seconds=highlight.duration,
+            encoder=self.encode_profile.encoder,
+            stage="cut-static",
+        )
 
     def _cut_dynamic(
         self,
@@ -158,7 +165,7 @@ class Cutter:
         writer.release()
         cap.release()
 
-        # Mux áudio do trecho original com o vídeo croppado, e re-encode em x264 H.264
+        # Mux do áudio original com o vídeo croppado e re-encode para H.264.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(tmp_video),
@@ -166,14 +173,18 @@ class Cutter:
             "-i", str(source),
             "-t", f"{highlight.duration:.3f}",
             "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+            *self.encode_profile.args,
             "-c:a", "aac", "-b:a", "192k",
             "-shortest",
             "-movflags", "+faststart",
             str(out_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        tmp_video.unlink(missing_ok=True)
-
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg mux falhou:\n{result.stderr}")
+        try:
+            run_with_progress(
+                cmd,
+                total_seconds=highlight.duration,
+                encoder=self.encode_profile.encoder,
+                stage="cut-dynamic-mux",
+            )
+        finally:
+            tmp_video.unlink(missing_ok=True)

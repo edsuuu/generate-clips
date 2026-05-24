@@ -7,12 +7,18 @@ pydantic>=2.10.0
 pydantic-settings>=2.7.0
 httpx>=0.28.0
 python-dotenv>=1.0.1
+minio>=7.2.0
 
 # Face tracking + Active Speaker Detection
 mediapipe>=0.10.18
 opencv-python>=4.10.0
 scipy>=1.14.0
 librosa>=0.10.2
+
+# API HTTP (microsserviço chamado pelo Laravel) — stateless, sem banco
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+sse-starlette>=2.1.0
 
 # Optional LLM providers (install only the ones you need)
 # anthropic>=0.40.0

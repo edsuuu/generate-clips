@@ -1,4 +1,4 @@
-from app.llm.base import LLMProvider
+from app.llm import LLMProvider
 from app.support.logger import logger
 from app.support.config import settings
 from app.support.types import Highlight, Transcript

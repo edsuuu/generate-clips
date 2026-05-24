@@ -1,74 +1,78 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
 
-class JobCreate(BaseModel):
-    url: str = Field(..., description="URL do vídeo do YouTube")
-
-    # Opcionais — webhook chamado ao concluir (success ou failure)
-    webhook_url: Optional[HttpUrl] = Field(
-        None, description="URL para POST do payload de conclusão"
+class CallbackMixin(BaseModel):
+    callback_url: Optional[HttpUrl] = Field(
+        None, description="Webhook Laravel chamado quando a etapa terminar"
     )
-    webhook_token: Optional[str] = Field(
-        None, description="Valor enviado no header de autenticação"
-    )
-    webhook_header: Optional[str] = Field(
-        "Authorization",
-        description="Nome do header que receberá o token (default: Authorization)",
+    callback_token: Optional[str] = Field(None, description="Token enviado no callback")
+    callback_header: Optional[str] = Field(
+        "Authorization", description="Header que recebe o token"
     )
 
-    # Opções do pipeline
-    llm: Optional[str] = Field(None, description="auto | local | gemini | claude | gpt")
+
+class AcceptedJobOut(BaseModel):
+    job_id: str
+    status: str = "accepted"
+
+
+class MinioObject(BaseModel):
+    bucket: Optional[str] = None
+    path: str
+
+
+class IngestOptions(BaseModel):
+    transcribe: bool = True
+    validate_transcript: bool = True
+    upload_original_to_minio: bool = True
+    llm: Optional[str] = None
+
+
+class IngestVideoRequest(CallbackMixin):
+    video_id: str = Field(..., description="UUID do video no Laravel")
+    url: str
+    options: IngestOptions = Field(default_factory=IngestOptions)
+
+
+class SubtitleFullRequest(CallbackMixin):
+    transcript_text: Optional[str] = None
+    transcript_json: dict[str, Any]
+    source_file: MinioObject
+    output: MinioObject
+
+
+class CutConstraints(BaseModel):
     min_cuts: Optional[int] = None
     max_cuts: Optional[int] = None
+    min_duration: Optional[float] = None
+    max_duration: Optional[float] = None
     min_gap: Optional[float] = None
-    no_subtitles: bool = False
-    no_vertical: bool = False
-    no_metadata: bool = False
-    no_face_tracking: bool = False
-    no_validate: bool = False
-    subtitle_only: bool = False
 
 
-class CutOut(BaseModel):
-    index: int
+class RecommendCutsRequest(CallbackMixin):
+    transcript_json: dict[str, Any]
+    video: dict[str, Any] = Field(default_factory=dict)
+    constraints: CutConstraints = Field(default_factory=CutConstraints)
+    user_prompt: Optional[str] = None
+    llm: Optional[str] = None
+
+
+class RenderCutRequest(BaseModel):
+    cut_id: str
     name: str
+    type: str
     start_seconds: float
     end_seconds: float
-    duration_seconds: float
-    score: float
-    reason: Optional[str] = None
-    video_path: str
-    title: Optional[str] = None
-    description: Optional[str] = None
-    hashtags: Optional[list[str]] = None
-
-    model_config = {"from_attributes": True}
+    vertical: bool = True
+    face_tracking: bool = True
+    output_path: str
 
 
-class JobOut(BaseModel):
-    id: str
-    url: str
-    status: str
-    progress: float
-    stage: str
-    message: str
-
-    video_youtube_id: Optional[str] = None
-    video_title: Optional[str] = None
-    video_duration: Optional[float] = None
-
-    error_message: Optional[str] = None
-    webhook_status: Optional[str] = None
-
-    created_at: datetime
-    updated_at: datetime
-    finished_at: Optional[datetime] = None
-
-    cuts: list[CutOut] = []
-
-    model_config = {"from_attributes": True}
+class RenderCutsRequest(CallbackMixin):
+    source_file: MinioObject
+    transcript_json: dict[str, Any] = Field(default_factory=dict)
+    cuts: list[RenderCutRequest]

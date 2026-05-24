@@ -56,7 +56,7 @@ class Transcriber:
             raise RuntimeError(f"ffmpeg falhou: {result.stderr}")
         return audio_path
 
-    def transcribe(self, video_path: Path) -> Transcript:
+    def transcribe(self, video_path: Path, on_progress=None) -> Transcript:
         audio_path = self._extract_audio(video_path)
 
         logger.info(
@@ -82,6 +82,7 @@ class Transcriber:
             log_prob_threshold=-1.0,
         )
 
+        total = float(info.duration) or 0.0
         segments: list[Segment] = []
         for seg in segments_iter:
             words = [
@@ -96,6 +97,8 @@ class Transcriber:
                     words=words,
                 )
             )
+            if on_progress is not None and total > 0:
+                on_progress(min(99.0, float(seg.end) / total * 100.0))
 
         transcript = Transcript(
             language=info.language,
