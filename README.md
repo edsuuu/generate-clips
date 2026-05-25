@@ -6,13 +6,13 @@ Transforma vídeos longos do YouTube em **cortes curtos legendados** para Shorts
 URL do YouTube  →  download  →  transcrição  →  análise  →  cortes  →  legendas  →  metadados
 ```
 
-Pode rodar como **CLI** (`python main.py process URL`) ou como **API** (`python main.py serve` → POST /jobs).
+Roda **exclusivamente como API HTTP** (`python main.py` → endpoints `/videos/*`), pensada como microsserviço stateless orquestrado por um app externo (Laravel).
 
 ---
 
 ## Estrutura do projeto
 
-Pensada no estilo Laravel: `main.py` é o entry point (como `artisan`), e tudo em `app/` segue divisão por responsabilidade.
+Pensada no estilo Laravel: `main.py` é o entry point (sobe a API), e tudo em `app/` segue divisão por responsabilidade.
 
 ```
 auto-post/
@@ -21,11 +21,11 @@ auto-post/
 ├── requirements.txt
 ├── .env / .env.example     # variáveis (chaves de API, DB, paths)
 ├── .gitignore
-├── main.py                 # ≈ artisan — entry point CLI (Typer)
+├── main.py                 # entry point — sobe a API (uvicorn)
 │
 ├── app/                    # ≈ app/ do Laravel — todo o código
 │   ├── pipeline/           # ≈ app/Services — etapas do pipeline
-│   │   ├── runner.py           # orquestrador (callback de progresso)
+│   │   ├── workflows/          # orquestradores granulares chamados pela API
 │   │   ├── downloader.py       # baixa do YouTube + cache local
 │   │   ├── transcriber.py      # transcrição (faster-whisper large-v3)
 │   │   ├── analyzer.py         # escolhe os melhores momentos via LLM
@@ -108,48 +108,14 @@ curl -O https://storage.googleapis.com/mediapipe-models/face_landmarker/face_lan
 
 ---
 
-## Como usar — CLI
-
-### Pipeline completo
-
-```bash
-python main.py process "https://www.youtube.com/watch?v=..."
-```
-
-Faz tudo: download → transcrição → análise → cortes verticais com face tracking → legendas → metadados (título/descrição/hashtags em PT-BR).
-
-### Flags úteis
-
-```bash
-# Quantidade de cortes (default: 6-20, gap mínimo 1s)
-python main.py process URL --min-cuts 8 --max-cuts 25 --min-gap 1.5
-
-# Forçar provider de IA
-python main.py process URL --llm gemini       # Google Gemini
-python main.py process URL --llm local        # Ollama (gemma2:9b)
-
-# Apenas legendar o vídeo inteiro (sem cortar)
-python main.py process URL --subtitle-only
-
-# Pular partes para testar mais rápido
-python main.py process URL --no-subtitles --no-metadata
-python main.py process URL --no-face-tracking   # crop centralizado estático
-python main.py process URL --no-vertical        # mantém proporção original
-
-# Exportar resultado completo em JSON
-python main.py process URL --json-result resultado.json
-```
-
----
-
 ## Como usar — API HTTP
 
 Sobe o servidor:
 
 ```bash
-python main.py serve                 # 0.0.0.0:8765 (configurável via .env)
-python main.py serve --port 9000     # outra porta
-python main.py serve --reload        # auto-reload em dev
+python main.py                              # 0.0.0.0:8765 (configurável via .env)
+AUTO_POST_PORT=9000 python main.py          # outra porta
+AUTO_POST_RELOAD=1 python main.py           # auto-reload em dev
 ```
 
 Docs interativas: <http://localhost:8765/docs>
@@ -261,7 +227,7 @@ output/
 └── <video_id>/
     ├── source.mp4              # original na melhor qualidade
     ├── meta.json               # cache (title, duration)
-    ├── full_subtitled.mp4      # gerado por --subtitle-only
+    ├── full_subtitled.mp4      # gerado pelo endpoint /videos/{id}/subtitle-full
     └── cuts/
         ├── PT1.mp4             # corte 1 (1080x1920, legendado, face tracking)
         ├── PT1.json            # título, descrição, hashtags, score
@@ -314,7 +280,7 @@ Os cortes:
 
 ## Fluxo interno
 
-1. **Runner** (`app/pipeline/runner.py`) — orquestra todas as etapas e emite `ProgressEvent(stage, percent, message)` em cada passo. CLI e API consomem o mesmo runner.
+1. **Workflows** (`app/pipeline/workflows/video.py`) — orquestram as etapas em fatias granulares chamadas pela API, sobem artefatos pro MinIO e emitem progresso via `bus` (SSE/WebSocket).
 2. **Downloader** — yt-dlp em **melhor qualidade**. Reusa `output/<id>/source.*` se já existir (cache local — não bate no YouTube).
 3. **Transcriber** — Whisper large-v3 com `beam_size=10`, prompt PT-BR, word timestamps, VAD filter.
 4. **Analyzer** — LLM seleciona 6–20 melhores momentos (60–80s). Valida ordem temporal e gap mínimo, escolhe o de maior score em caso de conflito.
@@ -327,14 +293,12 @@ Os cortes:
 
 ## Por onde começar (lendo o código)
 
-1. **`main.py`** — entry point CLI. Mostra como o Runner é chamado.
-2. **`app/pipeline/runner.py`** — leia a função `run()`: vê todas as etapas em ordem.
+1. **`app/api/main.py`** — entry point lógico: endpoints HTTP, SSE, WebSocket.
+2. **`app/pipeline/workflows/video.py`** — orquestradores chamados pela API (`ingest_video`, `recommend_cuts`, `render_cuts`, `subtitle_full_video`).
 3. **`app/support/types.py`** — dataclasses do domínio (`Transcript`, `Highlight`, `Cut`).
 4. **`app/support/config.py`** — todas as configs disponíveis.
 5. **`app/pipeline/*.py`** — cada arquivo é uma etapa do pipeline.
-6. **`app/api/main.py`** — endpoints HTTP, SSE, WebSocket.
-7. **`app/api/jobs.py`** — worker async + pub/sub + webhook.
-8. **`app/llm/__init__.py`** — interface de provider de IA e factory.
+6. **`app/llm/__init__.py`** — interface de provider de IA e factory.
 
 ---
 

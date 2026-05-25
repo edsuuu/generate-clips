@@ -1,7 +1,6 @@
 yt-dlp>=2025.1.15
 faster-whisper>=1.1.0
 ffmpeg-python>=0.2.0
-typer>=0.15.1
 rich>=13.9.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0

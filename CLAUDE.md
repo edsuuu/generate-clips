@@ -4,28 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## O que o projeto faz
 
-Pipeline em Python que baixa um vídeo do YouTube, transcreve com Whisper, valida a transcrição cruzando com o áudio via Gemini multimodal, seleciona os melhores momentos com LLM, corta com **face tracking + active speaker detection** (crop dinâmico 9:16), queima legendas estilo TikTok e gera título/descrição/hashtags. Roda como CLI (`main.py process URL`) ou como API HTTP com SSE + WebSocket (`main.py serve`).
+Pipeline em Python que baixa um vídeo do YouTube, transcreve com Whisper, valida a transcrição cruzando com o áudio via Gemini multimodal, seleciona os melhores momentos com LLM, corta com **face tracking + active speaker detection** (crop dinâmico 9:16), queima legendas estilo TikTok e gera título/descrição/hashtags. Roda **exclusivamente como API HTTP** (FastAPI) com SSE + WebSocket — não há mais CLI.
 
-Este repositório é **só Python** — não tem código Laravel e **não recriar** a menos que o usuário peça explicitamente. Na operação real, um app Laravel externo é o **orquestrador e dono do banco**: ele chama os endpoints granulares da API, e o Python roda **stateless** (sem banco), só executando as etapas, gravando em MinIO/disco e devolvendo o resultado via callback. O CLI (`main.py process`) roda o pipeline completo localmente, sem precisar de Laravel nem MinIO.
+Este repositório é **só Python** — não tem código Laravel e **não recriar** a menos que o usuário peça explicitamente. Na operação real, um app Laravel externo é o **orquestrador e dono do banco**: ele chama os endpoints granulares da API, e o Python roda **stateless** (sem banco), só executando as etapas, gravando em MinIO/disco e devolvendo o resultado via callback.
 
 ## Comandos comuns
 
 Sempre rodar com o venv local — o `.venv/bin/pip` pode ter shebang quebrado por causa de moves passados; use `.venv/bin/python -m pip` se acontecer.
 
 ```bash
-# CLI direto
-.venv/bin/python main.py process "https://www.youtube.com/watch?v=..."
-.venv/bin/python main.py process URL --no-validate --no-subtitles --no-face-tracking  # modo rápido para debug
-.venv/bin/python main.py process URL --subtitle-only                                    # só legenda o vídeo inteiro
-
 # API HTTP (porta 8765 default) — sem banco, stateless
-.venv/bin/python main.py serve
+.venv/bin/python main.py
+AUTO_POST_RELOAD=1 .venv/bin/python main.py   # com auto-reload em mudança de código
 
 # Validar imports após mexer em algum módulo
-.venv/bin/python -c "from app.pipeline.runner import PipelineRunner; from app.api.main import app; print('ok')"
+.venv/bin/python -c "from app.api.main import app; import main; print('ok')"
 
 # Reiniciar API quando travar a porta
-lsof -ti :8765 | xargs kill -9; .venv/bin/python main.py serve
+lsof -ti :8765 | xargs kill -9; .venv/bin/python main.py
 
 # Acompanhar job via SSE (o job_id volta no 202 do endpoint que disparou)
 curl -sN http://localhost:8765/jobs/<job_id>/events
@@ -48,16 +44,13 @@ ollama list          # confere que tem gemma2:9b
 
 ## Arquitetura — o que precisa entender para ser produtivo
 
-Existem **dois orquestradores**, mas ambos reusam as **mesmas classes de etapa** em `app/pipeline/` (`Downloader`, `Transcriber`, `Analyzer`, `FaceTracker`, `Cutter`, `Subtitler`) — não duplique lógica de etapa fora desses módulos:
+A orquestração é feita pelos **workflows granulares** em **`app/pipeline/workflows/video.py`** (`ingest_video`, `recommend_cuts`, `render_cuts`, `subtitle_full_video`), que reusam as **classes de etapa** em `app/pipeline/` (`Downloader`, `Transcriber`, `Analyzer`, `FaceTracker`, `Cutter`, `Subtitler`) — não duplique lógica de etapa fora desses módulos. Cada workflow faz uma fatia do pipeline, sobe artefatos pro MinIO e dispara callback.
 
-- **CLI** (`main.py process`) → **`PipelineRunner`** em `app/pipeline/runner.py`. Roda o pipeline completo end-to-end, grava em `output/` e emite `ProgressEvent(stage, percent, message, detail)` a cada passo.
-- **API** (`main.py serve`) → workflows granulares em **`app/pipeline/workflows/video.py`** (`ingest_video`, `recommend_cuts`, `render_cuts`, `subtitle_full_video`). Cada um faz uma fatia do pipeline, sobe artefatos pro MinIO e dispara callback. **Não** passam pelo `PipelineRunner`.
-
-Ordem das etapas no `PipelineRunner` (com pesos no progresso 0–100): `download(5) → transcribe(22) → validate(5) → analyze(3) → face_track(15) → cut(15) → subtitle(20) → metadata(15)`. Se mexer em alguma etapa, atualize `WEIGHTS` em `runner.py` para o `percent` continuar somando 100.
+O entry point `main.py` (raiz) só sobe o uvicorn apontando para `app.api.main:app` — não tem lógica de pipeline.
 
 ### Camadas independentes
 
-- **`app/pipeline/`** — cada arquivo é uma etapa pura. Recebem inputs tipados (`Transcript`, `Highlight`, `VideoInfo`) e devolvem o próximo. Sem efeitos colaterais além de arquivos em `output/`. Adicione etapas novas registrando no `runner.py` (e no dict `WEIGHTS`).
+- **`app/pipeline/`** — cada arquivo é uma etapa pura. Recebem inputs tipados (`Transcript`, `Highlight`, `VideoInfo`) e devolvem o próximo. Sem efeitos colaterais além de arquivos em `output/`. Etapas novas são compostas dentro dos workflows em `app/pipeline/workflows/video.py`.
 - **`app/llm/`** — providers de IA atrás da interface `LLMProvider`. `get_provider(name)` (definido em `app/llm/__init__.py`) é o único ponto de entrada. O `auto` provider tenta Gemini primeiro e cai para Ollama em falha — não chame `GeminiProvider()` direto fora do factory, isso quebra o fallback.
 - **`app/api/`** — FastAPI. `main.py` define rotas, `jobs.py` roda o pipeline em thread separada e publica eventos via `bus` (pub/sub em memória), `schemas.py` são os DTOs Pydantic. O `bus.publish()` é o que alimenta SSE e WebSocket simultaneamente.
 - **`app/db/`** — SQLAlchemy + MySQL. Models em `models.py` (`Job`, `Cut`). Sem migrations (usa `Base.metadata.create_all()` em `init_db()`).
