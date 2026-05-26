@@ -27,11 +27,7 @@ def _extract_video_id(url: str) -> str | None:
 
 # Sempre baixa na melhor qualidade possível disponível.
 # Preferência: bestvideo+bestaudio mesclados em mp4. Fallback: melhor stream único.
-BEST_QUALITY_FORMAT = (
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-    "bestvideo+bestaudio/"
-    "best[ext=mp4]/best"
-)
+BEST_QUALITY_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
 
 
 class Downloader:
@@ -53,11 +49,11 @@ class Downloader:
             cached_file = self._find_existing(self.output_dir / guessed_id)
             if cached_meta is not None and cached_file is not None:
                 logger.info(
-                    f"Vídeo já em cache: {cached_meta.get('title', guessed_id)} "
-                    f"(pulando download)"
+                    f"Vídeo já em cache: {cached_meta.get('title', guessed_id)} (pulando download)"
                 )
                 return VideoInfo(
-                    url=url, video_id=guessed_id,
+                    url=url,
+                    video_id=guessed_id,
                     title=cached_meta.get("title", guessed_id),
                     duration=float(cached_meta.get("duration", 0)),
                     file_path=cached_file,
@@ -78,8 +74,11 @@ class Downloader:
             logger.info(f"Vídeo já em cache: {cached.name} (pulando download)")
             self._save_meta(video_dir, title, duration)
             return VideoInfo(
-                url=url, video_id=video_id, title=title,
-                duration=duration, file_path=cached,
+                url=url,
+                video_id=video_id,
+                title=title,
+                duration=duration,
+                file_path=cached,
             )
 
         logger.info(f"Baixando vídeo: {url}")
@@ -90,9 +89,7 @@ class Downloader:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "postprocessors": [
-                {"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}
-            ],
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
         }
         if on_progress is not None:
             ydl_opts["progress_hooks"] = [self._make_hook(on_progress)]
@@ -107,8 +104,11 @@ class Downloader:
         self._save_meta(video_dir, title, duration)
         logger.info(f"Vídeo baixado: {title} ({duration:.0f}s) -> {file_path.name}")
         return VideoInfo(
-            url=url, video_id=video_id, title=title,
-            duration=duration, file_path=file_path,
+            url=url,
+            video_id=video_id,
+            title=title,
+            duration=duration,
+            file_path=file_path,
         )
 
     @staticmethod
@@ -120,6 +120,7 @@ class Downloader:
             done = d.get("downloaded_bytes", 0)
             if total:
                 on_progress(min(99.0, done / total * 100.0))
+
         return hook
 
     @staticmethod
@@ -138,6 +139,7 @@ class Downloader:
         if not meta_file.is_file():
             return None
         import json
+
         try:
             return json.loads(meta_file.read_text(encoding="utf-8"))
         except Exception:
@@ -146,6 +148,7 @@ class Downloader:
     @staticmethod
     def _save_meta(video_dir: Path, title: str, duration: float) -> None:
         import json
+
         (video_dir / "meta.json").write_text(
             json.dumps({"title": title, "duration": duration}, ensure_ascii=False),
             encoding="utf-8",

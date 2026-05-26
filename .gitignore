@@ -11,3 +11,4 @@ output/
 .ruff_cache/
 .DS_Store
 docs/
+TRANSCRICAO_NOTAS.local.md

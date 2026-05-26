@@ -15,20 +15,24 @@ Estratégia:
 
 from __future__ import annotations
 
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+# Reduz ruído nativo de MediaPipe/TFLite no stderr do processo.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
 import cv2  # type: ignore
-import librosa  # type: ignore
 import mediapipe as mp  # type: ignore
 import numpy as np
 from mediapipe.tasks import python as mp_tasks  # type: ignore
 from mediapipe.tasks.python import vision as mp_vision  # type: ignore
 
-from app.support.logger import logger
 from app.support.config import settings
+from app.support.logger import logger
 from app.support.types import CropPoint, CropTrajectory
-
 
 # app/pipeline/face_tracker.py → raiz é parent.parent.parent
 MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
@@ -62,18 +66,14 @@ class FaceTracker:
             )
 
         fd_options = mp_vision.FaceDetectorOptions(
-            base_options=mp_tasks.BaseOptions(
-                model_asset_path=str(FACE_DETECTOR_MODEL)
-            ),
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(FACE_DETECTOR_MODEL)),
             running_mode=mp_vision.RunningMode.IMAGE,
             min_detection_confidence=0.5,
         )
         self._face_detector = mp_vision.FaceDetector.create_from_options(fd_options)
 
         fl_options = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_tasks.BaseOptions(
-                model_asset_path=str(FACE_LANDMARKER_MODEL)
-            ),
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(FACE_LANDMARKER_MODEL)),
             running_mode=mp_vision.RunningMode.IMAGE,
             num_faces=4,
             min_face_detection_confidence=0.5,
@@ -133,8 +133,10 @@ class FaceTracker:
                 frame_obs.append(
                     _FaceObservation(
                         timestamp=float(ts),
-                        cx=cx, cy=cy,
-                        bbox_w=w, bbox_h=h,
+                        cx=cx,
+                        cy=cy,
+                        bbox_w=w,
+                        bbox_h=h,
                         lip_open=lip_open,
                     )
                 )
@@ -170,22 +172,17 @@ class FaceTracker:
             for face_idx, obs in enumerate(frame_obs):
                 prev_lip_opens[face_idx] = obs.lip_open
 
-            trajectory.points.append(
-                CropPoint(timestamp=float(ts), x=chosen.cx, y=chosen.cy)
-            )
+            trajectory.points.append(CropPoint(timestamp=float(ts), x=chosen.cx, y=chosen.cy))
             last_known = (chosen.cx, chosen.cy)
 
         trajectory = self._smooth(trajectory, width, height)
 
         logger.info(
-            f"Face tracking [{start:.1f}s-{end:.1f}s]: "
-            f"{len(trajectory.points)} pontos amostrados"
+            f"Face tracking [{start:.1f}s-{end:.1f}s]: {len(trajectory.points)} pontos amostrados"
         )
         return trajectory
 
-    def _detect_faces(
-        self, mp_image, width: int, height: int
-    ) -> list[tuple[int, int, int, int]]:
+    def _detect_faces(self, mp_image, width: int, height: int) -> list[tuple[int, int, int, int]]:
         result = self._face_detector.detect(mp_image)
         if not result.detections:
             return []
@@ -215,15 +212,44 @@ class FaceTracker:
         timestamps: np.ndarray,
     ) -> np.ndarray:
         try:
-            y, sr = librosa.load(
-                str(video_path), sr=16000, mono=True,
-                offset=start, duration=end - start,
-            )
+            sr = 16000
+            duration = max(0.0, end - start)
+            if duration <= 0:
+                return np.zeros(len(timestamps))
+
+            cmd = [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration:.3f}",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sr),
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "pipe:1",
+            ]
+            result = subprocess.run(cmd, capture_output=True, check=False)
+            if result.returncode != 0:
+                stderr = result.stderr.decode("utf-8", errors="ignore").strip()
+                raise RuntimeError(stderr or "ffmpeg retornou erro ao extrair áudio")
+
+            y = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
+            if y.size == 0:
+                return np.zeros(len(timestamps))
+            y /= 32768.0
         except Exception as e:
             logger.warning(f"Falha ao carregar áudio para ASD: {e}")
-            return np.zeros(len(timestamps))
-
-        if len(y) == 0:
             return np.zeros(len(timestamps))
 
         window = int(0.1 * sr)
@@ -236,16 +262,14 @@ class FaceTracker:
             if len(chunk) == 0:
                 energies.append(0.0)
             else:
-                energies.append(float(np.sqrt(np.mean(chunk ** 2))))
+                energies.append(float(np.sqrt(np.mean(chunk**2))))
 
         e = np.array(energies)
         if e.max() > 0:
             e = e / e.max()
         return e
 
-    def _smooth(
-        self, trajectory: CropTrajectory, width: int, height: int
-    ) -> CropTrajectory:
+    def _smooth(self, trajectory: CropTrajectory, width: int, height: int) -> CropTrajectory:
         if len(trajectory.points) < 5:
             return trajectory
 

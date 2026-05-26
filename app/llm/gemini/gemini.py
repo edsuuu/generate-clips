@@ -20,8 +20,8 @@ from app.llm.gemini.rate_limit import limiter
 from app.support.config import settings
 from app.support.logger import logger
 
-
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
 
 def _estimate_tokens(text: str) -> int:
     """Heurística: 1 token ≈ 4 chars (válido para PT-BR/EN)."""
@@ -45,8 +45,7 @@ class GeminiProvider(LLMProvider):
         if fallback_models is None:
             env_cascade = os.environ.get("GEMINI_FALLBACK_MODELS", "").strip()
             fallback_models = (
-                [m.strip() for m in env_cascade.split(",") if m.strip()]
-                if env_cascade else None
+                [m.strip() for m in env_cascade.split(",") if m.strip()] if env_cascade else None
             )
 
         primary = model or settings.gemini_model
@@ -59,7 +58,9 @@ class GeminiProvider(LLMProvider):
         est_tokens = _estimate_tokens(system) + _estimate_tokens(user) + 2048
         last_error: Exception | None = None
         if len(self._exhausted) >= len(self.models):
-            logger.warning("[gemini] todos os modelos estavam marcados como esgotados; resetando cache local.")
+            logger.warning(
+                "[gemini] todos os modelos estavam marcados como esgotados; resetando cache local."
+            )
             self._exhausted.clear()
 
         ordered_models = self._ordered_models()

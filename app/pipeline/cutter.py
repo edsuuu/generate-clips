@@ -14,7 +14,7 @@ import numpy as np
 
 from app.support.ffmpeg import build_video_encode_profile, run_with_progress
 from app.support.logger import logger
-from app.support.types import Cut, CropTrajectory, Highlight, VideoInfo
+from app.support.types import CropTrajectory, Cut, Highlight, VideoInfo
 
 TARGET_W = 1080
 TARGET_H = 1920
@@ -54,28 +54,33 @@ class Cutter:
 
         if self.face_tracker is not None:
             try:
-                trajectory = self.face_tracker.track_segment(
-                    source, highlight.start, highlight.end
-                )
+                trajectory = self.face_tracker.track_segment(source, highlight.start, highlight.end)
                 self._cut_dynamic(source, highlight, out_path, trajectory)
                 return
             except Exception as e:
                 logger.warning(
-                    f"Face tracking falhou em {out_path.name}: {e}. "
-                    f"Caindo para crop centralizado."
+                    f"Face tracking falhou em {out_path.name}: {e}. Caindo para crop centralizado."
                 )
 
         self._cut_vertical_static(source, highlight, out_path)
 
     def _cut_simple(self, source: Path, highlight: Highlight, out_path: Path) -> None:
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{highlight.start:.3f}",
-            "-i", str(source),
-            "-t", f"{highlight.duration:.3f}",
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{highlight.start:.3f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{highlight.duration:.3f}",
             *self.encode_profile.args,
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
             str(out_path),
         ]
         run_with_progress(
@@ -85,22 +90,29 @@ class Cutter:
             stage="cut-simple",
         )
 
-    def _cut_vertical_static(
-        self, source: Path, highlight: Highlight, out_path: Path
-    ) -> None:
+    def _cut_vertical_static(self, source: Path, highlight: Highlight, out_path: Path) -> None:
         vf = (
             f"scale=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_W}:{TARGET_H}"
         )
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{highlight.start:.3f}",
-            "-i", str(source),
-            "-t", f"{highlight.duration:.3f}",
-            "-vf", vf,
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{highlight.start:.3f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{highlight.duration:.3f}",
+            "-vf",
+            vf,
             *self.encode_profile.args,
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
             str(out_path),
         ]
         run_with_progress(
@@ -157,7 +169,7 @@ class Cutter:
             x = int(np.clip(cx - crop_w // 2, 0, src_w - crop_w))
             y = int(np.clip(cy - crop_h // 2, 0, src_h - crop_h))
 
-            cropped = frame[y:y + crop_h, x:x + crop_w]
+            cropped = frame[y : y + crop_h, x : x + crop_w]
             resized = cv2.resize(cropped, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LANCZOS4)
             writer.write(resized)
             frame_idx += 1
@@ -167,16 +179,28 @@ class Cutter:
 
         # Mux do áudio original com o vídeo croppado e re-encode para H.264.
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(tmp_video),
-            "-ss", f"{highlight.start:.3f}",
-            "-i", str(source),
-            "-t", f"{highlight.duration:.3f}",
-            "-map", "0:v:0", "-map", "1:a:0",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(tmp_video),
+            "-ss",
+            f"{highlight.start:.3f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{highlight.duration:.3f}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
             *self.encode_profile.args,
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
             "-shortest",
-            "-movflags", "+faststart",
+            "-movflags",
+            "+faststart",
             str(out_path),
         ]
         try:

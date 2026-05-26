@@ -133,7 +133,7 @@ async def job_events(job_id: str):
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield {"event": "ping", "data": ""}
                     continue
                 yield {"event": event.get("stage", "progress"), "data": json.dumps(event)}
@@ -158,7 +158,7 @@ async def job_ws(websocket: WebSocket, job_id: str):
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await websocket.send_json({"type": "ping"})
                 continue
             await websocket.send_json({"type": "progress", **event})

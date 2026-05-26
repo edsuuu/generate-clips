@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import os
-
 import httpx
 
-from app.llm.gemini import MULTIMODAL_MODEL_POOL, build_model_cascade, limiter as rate_limiter
+from app.llm.gemini import MULTIMODAL_MODEL_POOL, build_model_cascade
+from app.llm.gemini import limiter as rate_limiter
 from app.support.config import settings
 from app.support.logger import logger
 from app.support.types import Segment, Transcript, Word
@@ -80,8 +80,7 @@ class TranscriptValidator:
         if fallback_models is None:
             env_cascade = os.environ.get("GEMINI_MULTIMODAL_FALLBACKS", "").strip()
             fallback_models = (
-                [m.strip() for m in env_cascade.split(",") if m.strip()]
-                if env_cascade else None
+                [m.strip() for m in env_cascade.split(",") if m.strip()] if env_cascade else None
             )
         self.models = build_model_cascade(primary, fallback_models, MULTIMODAL_MODEL_POOL)
 
@@ -106,9 +105,18 @@ class TranscriptValidator:
         """Comprime para MP3 mono 24kbps — fica leve para envio inline (~3KB/s)."""
         out = audio_path.with_name(audio_path.stem + ".validate.mp3")
         cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ac", "1", "-ar", "16000",
-            "-c:a", "libmp3lame", "-b:a", "24k",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "24k",
             str(out),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -147,16 +155,20 @@ class TranscriptValidator:
 
         payload_base = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{
-                "role": "user",
-                "parts": [
-                    {"inline_data": {
-                        "mime_type": mime,
-                        "data": base64.b64encode(audio_bytes).decode("ascii"),
-                    }},
-                    {"text": user_text},
-                ],
-            }],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": mime,
+                                "data": base64.b64encode(audio_bytes).decode("ascii"),
+                            }
+                        },
+                        {"text": user_text},
+                    ],
+                }
+            ],
             "generationConfig": {
                 "temperature": 0.1,
                 "responseMimeType": "application/json",
@@ -240,12 +252,14 @@ class TranscriptValidator:
                 continue
             new_text = index_to_corr[i].corrected_text
             new_words = self._redistribute_words(seg, new_text)
-            new_segments.append(Segment(
-                text=new_text,
-                start=seg.start,
-                end=seg.end,
-                words=new_words,
-            ))
+            new_segments.append(
+                Segment(
+                    text=new_text,
+                    start=seg.start,
+                    end=seg.end,
+                    words=new_words,
+                )
+            )
 
         return Transcript(
             language=transcript.language,

@@ -2,7 +2,6 @@ from app.llm import LLMProvider
 from app.support.logger import logger
 from app.support.types import CutMetadata, Highlight, Transcript
 
-
 SYSTEM_PROMPT = """Você é um social media especialista em copy para Shorts, Reels e TikTok.
 Receberá o trecho de um vídeo e deve criar:
 
@@ -61,9 +60,7 @@ class MetadataGenerator:
         description = str(data.get("description", "")).strip()
         hashtags_raw = data.get("hashtags", [])
         hashtags = [
-            str(h).lstrip("#").strip().replace(" ", "")
-            for h in hashtags_raw
-            if str(h).strip()
+            str(h).lstrip("#").strip().replace(" ", "") for h in hashtags_raw if str(h).strip()
         ]
 
         logger.info(f"Metadados gerados: {title}")

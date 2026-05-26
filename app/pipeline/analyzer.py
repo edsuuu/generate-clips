@@ -1,8 +1,7 @@
 from app.llm import LLMProvider
-from app.support.logger import logger
 from app.support.config import settings
+from app.support.logger import logger
 from app.support.types import Highlight, Transcript
-
 
 SYSTEM_PROMPT = """Você é um editor especialista em conteúdo viral para TikTok, Reels e Shorts.
 Sua tarefa é analisar a transcrição de um vídeo longo e selecionar os MELHORES momentos
@@ -102,9 +101,7 @@ class Analyzer:
         ]
 
         validated = self._validate_and_clean(highlights, transcript.duration)
-        logger.info(
-            f"{len(raw)} highlights propostos, {len(validated)} válidos após filtragem"
-        )
+        logger.info(f"{len(raw)} highlights propostos, {len(validated)} válidos após filtragem")
         return validated[: self.max_cuts]
 
     def _validate_and_clean(

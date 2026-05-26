@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,8 @@ from app.llm import get_provider
 from app.pipeline.analyzer import Analyzer
 from app.pipeline.cutter import Cutter
 from app.pipeline.downloader import Downloader
+from app.pipeline.hls import HlsPackager
+from app.pipeline.metadata import MetadataGenerator
 from app.pipeline.subtitler import Subtitler
 from app.pipeline.transcriber import Transcriber
 from app.storage import MinioStorageProvider
@@ -61,7 +62,9 @@ def _transcript_to_payload(transcript: Transcript) -> dict[str, Any]:
     }
 
 
-def _transcript_from_payload(payload: dict[str, Any], fallback_text: str | None = None) -> Transcript:
+def _transcript_from_payload(
+    payload: dict[str, Any], fallback_text: str | None = None
+) -> Transcript:
     segments = [
         Segment(
             text=str(segment.get("text", "")),
@@ -90,6 +93,38 @@ def _transcript_from_payload(payload: dict[str, Any], fallback_text: str | None 
     )
 
 
+def _upload_hls_package(
+    storage: MinioStorageProvider,
+    video_id: str,
+    package_dir: Path,
+) -> dict[str, Any]:
+    root_prefix = _object_path(video_id, "hls")
+    master_file: dict[str, Any] | None = None
+
+    for file_path in sorted(package_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        relative = file_path.relative_to(package_dir).as_posix()
+        object_path = f"{root_prefix}/{relative}"
+        content_type = (
+            "application/vnd.apple.mpegurl" if file_path.suffix == ".m3u8" else "video/mp2t"
+        )
+        stored = storage.upload_file(
+            file_path,
+            object_path,
+            file_type="hls_master" if relative == "master.m3u8" else "hls_asset",
+            content_type=content_type,
+        ).to_dict()
+        if relative == "master.m3u8":
+            master_file = stored
+
+    if master_file is None:
+        raise RuntimeError("Pacote HLS gerado sem master.m3u8")
+
+    return master_file
+
+
 def _post_webhook(
     callback_url: Any,
     token: str | None,
@@ -105,10 +140,7 @@ def _post_webhook(
     if token:
         headers[header or "Authorization"] = token
 
-    should_raise = (
-        settings.webhook_fail_job_on_error
-        if raise_on_error is None else raise_on_error
-    )
+    should_raise = settings.webhook_fail_job_on_error if raise_on_error is None else raise_on_error
     event_name = str(payload.get("event", "unknown"))
 
     try:
@@ -116,12 +148,12 @@ def _post_webhook(
         with httpx.Client(timeout=settings.webhook_timeout_seconds) as client:
             response = client.post(str(callback_url), json=payload, headers=headers)
             response.raise_for_status()
-        logger.info(f"[webhook] entregue com sucesso event={event_name} status={response.status_code}")
+        logger.info(
+            f"[webhook] entregue com sucesso event={event_name} status={response.status_code}"
+        )
         return True
     except Exception as exc:
-        logger.warning(
-            f"[webhook] falhou event={event_name} url={callback_url}: {exc}"
-        )
+        logger.warning(f"[webhook] falhou event={event_name} url={callback_url}: {exc}")
         if should_raise:
             raise
         return False
@@ -166,19 +198,33 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
         files = []
         if payload.options.upload_original_to_minio:
             emit(job_id, "upload", 27, "Enviando original ao MinIO...")
-            original_path = _object_path(payload.video_id, f"original/source{video.file_path.suffix}")
+            original_path = _object_path(
+                payload.video_id, f"original/source{video.file_path.suffix}"
+            )
             files.append(
                 storage.upload_file(video.file_path, original_path, file_type="original").to_dict()
             )
 
+            emit(job_id, "hls", 32, "Empacotando vídeo em HLS...")
+            hls_package = HlsPackager().package(
+                video.file_path,
+                temp_dir / "hls",
+                total_seconds=video.duration,
+                on_progress=lambda p: emit(job_id, "hls", 32 + p * 0.13, "Gerando HLS..."),
+            )
+            emit(job_id, "upload", 46, "Enviando HLS ao MinIO...")
+            files.append(_upload_hls_package(storage, payload.video_id, hls_package.output_dir))
+
         transcript = None
         validated = None
         if payload.options.transcribe:
-            emit(job_id, "transcribe", 30, "Transcrevendo áudio...")
-            # Transcrição ocupa a banda 30%-70%
+            emit(job_id, "transcribe", 48, "Transcrevendo áudio...")
+            # Transcrição ocupa a banda 48%-88%
             transcript = Transcriber().transcribe(
                 video.file_path,
-                on_progress=lambda p: emit(job_id, "transcribe", 30 + p * 0.40, "Transcrevendo áudio..."),
+                on_progress=lambda p: emit(
+                    job_id, "transcribe", 48 + p * 0.40, "Transcrevendo áudio..."
+                ),
             )
             audio_path = video.file_path.with_suffix(".wav")
             if audio_path.exists():
@@ -192,7 +238,7 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
                 )
 
             if payload.options.validate_transcript:
-                emit(job_id, "validate", 75, "Validando transcrição com áudio...")
+                emit(job_id, "validate", 90, "Validando transcrição com áudio...")
                 try:
                     validated = _validate_transcript(audio_path, transcript)
                 except Exception as exc:
@@ -205,7 +251,9 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
             "video_id": payload.video_id,
             "event": "ingest.completed",
             "status": "waiting_transcript_review" if transcript else "downloaded",
-            "message": "Transcricao finalizada aguardando revisao" if transcript else "Download finalizado",
+            "message": "Transcricao finalizada aguardando revisao"
+            if transcript
+            else "Download finalizado",
             "video": {
                 "external_video_id": video.video_id,
                 "url": video.url,
@@ -221,12 +269,17 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
                 "is_validated_by_ai": validated is not None,
             },
             "payloads": [
-                {"type": "ingest_result", "payload": {"video": {
-                    "external_video_id": video.video_id,
-                    "url": video.url,
-                    "title": video.title,
-                    "duration_seconds": video.duration,
-                }}},
+                {
+                    "type": "ingest_result",
+                    "payload": {
+                        "video": {
+                            "external_video_id": video.video_id,
+                            "url": video.url,
+                            "title": video.title,
+                            "duration_seconds": video.duration,
+                        }
+                    },
+                },
             ],
         }
         if raw_payload:
@@ -266,7 +319,9 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
     try:
         emit(job_id, "download", 10, "Baixando vídeo do MinIO...")
         source_ext = Path(payload.source_file.path).suffix or ".mp4"
-        source_path = storage.download_file(payload.source_file.path, temp_dir / f"source{source_ext}")
+        source_path = storage.download_file(
+            payload.source_file.path, temp_dir / f"source{source_ext}"
+        )
         transcript = _transcript_from_payload(payload.transcript_json, payload.transcript_text)
         out_path = temp_dir / "legendado.mp4"
 
@@ -279,7 +334,14 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             out_path,
             on_progress=lambda p: emit(job_id, "subtitle", 40 + p * 0.55, "Queimando legendas..."),
         )
-        emit(job_id, "upload", 95, "Enviando vídeo legendado ao MinIO...")
+        emit(job_id, "hls", 95, "Empacotando vídeo legendado em HLS...")
+        hls_package = HlsPackager().package(
+            out_path,
+            temp_dir / "hls",
+            total_seconds=transcript.duration,
+            on_progress=lambda p: emit(job_id, "hls", 95 + p * 0.03, "Gerando HLS legendado..."),
+        )
+        emit(job_id, "upload", 98, "Enviando vídeo legendado ao MinIO...")
 
         stored = storage.upload_file(
             out_path,
@@ -287,6 +349,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             file_type="legendado",
             content_type="video/mp4",
         ).to_dict()
+        hls_master = _upload_hls_package(storage, video_id, hls_package.output_dir)
         result = {
             "job_id": job_id,
             "video_id": video_id,
@@ -294,7 +357,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             "status": "full_subtitled",
             "message": "Video completo legendado",
             "file": stored,
-            "files": [stored],
+            "files": [stored, hls_master],
             "payloads": [{"type": "subtitle_result", "payload": {"file": stored}}],
         }
         emit(job_id, "done", 100, "Vídeo legendado")
@@ -321,7 +384,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
 
 
 def recommend_cuts(video_id: str, payload: RecommendCutsRequest) -> dict[str, Any]:
-    transcript = _transcript_from_payload(payload.transcript_json)
+    transcript = _transcript_from_payload(payload.transcript_json, payload.transcript_text)
     provider = get_provider(payload.llm)
     analyzer = Analyzer(
         provider,
@@ -352,7 +415,7 @@ def recommend_cuts(video_id: str, payload: RecommendCutsRequest) -> dict[str, An
         "payloads": [
             {
                 "type": "cuts_recommendation_result",
-                "payload": {"video": payload.video, "cuts": cuts},
+                "payload": {"video": payload.video or {}, "cuts": cuts},
             }
         ],
     }
@@ -370,27 +433,50 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
     storage = MinioStorageProvider()
     try:
         source_ext = Path(payload.source_file.path).suffix or ".mp4"
-        source_path = storage.download_file(payload.source_file.path, temp_dir / f"source{source_ext}")
+        source_path = storage.download_file(
+            payload.source_file.path, temp_dir / f"source{source_ext}"
+        )
         transcript = _transcript_from_payload(payload.transcript_json)
         out_dir = temp_dir / "cuts"
         out_dir.mkdir(parents=True, exist_ok=True)
         files = []
 
+        # Gera título/descrição/hashtags por corte (alimenta a tela de agendamento no Laravel).
+        metadata_gen = None
+        video_title = ""
+        if payload.video and isinstance(payload.video, dict):
+            video_title = str(payload.video.get("title") or "")
+        if payload.generate_metadata:
+            try:
+                metadata_gen = MetadataGenerator(get_provider(payload.llm))
+            except Exception as exc:
+                logger.warning(f"MetadataGenerator indisponível ({exc}); cortes sem metadados")
+
         # Reaproveita um único FaceTracker entre cortes (carregar modelos é caro).
         face_tracker = None
-        if any(c.vertical and c.face_tracking for c in payload.cuts) and settings.face_tracking_enabled:
+        if (
+            any(c.vertical and c.face_tracking for c in payload.cuts)
+            and settings.face_tracking_enabled
+        ):
             try:
                 from app.pipeline.face_tracker import FaceTracker
+
                 face_tracker = FaceTracker()
             except Exception as exc:
                 logger.warning(f"FaceTracker indisponivel ({exc}); usando crop estatico")
 
         total = len(payload.cuts)
         for idx, cut in enumerate(payload.cuts, start=1):
-            logger.info(f"Renderizando corte {cut.name} ({cut.start_seconds:.1f}s-{cut.end_seconds:.1f}s)")
+            logger.info(
+                f"Renderizando corte {cut.name} ({cut.start_seconds:.1f}s-{cut.end_seconds:.1f}s)"
+            )
             emit(
-                job_id, "cut", round(idx / max(total, 1) * 90, 1),
-                f"Renderizando {cut.name} ({idx}/{total})", index=idx, total=total,
+                job_id,
+                "cut",
+                round(idx / max(total, 1) * 90, 1),
+                f"Renderizando {cut.name} ({idx}/{total})",
+                index=idx,
+                total=total,
             )
             out_path = out_dir / f"{cut.type}.mp4"
             cutter = Cutter(
@@ -421,6 +507,20 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
                 content_type="video/mp4",
             ).to_dict()
             stored["cut_id"] = cut.cut_id
+
+            if metadata_gen is not None:
+                try:
+                    meta = metadata_gen.generate(
+                        video_title,
+                        transcript,
+                        Highlight(start=cut.start_seconds, end=cut.end_seconds),
+                    )
+                    stored["title"] = meta.title
+                    stored["description"] = meta.description
+                    stored["hashtags"] = meta.hashtags
+                except Exception as exc:
+                    logger.warning(f"Metadados do corte {cut.name} falharam: {exc}")
+
             files.append(stored)
 
         result = {
