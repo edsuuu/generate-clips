@@ -132,26 +132,9 @@ class TranscriptValidator:
             raise ValueError(f"Áudio muito grande para envio inline ({size_mb:.1f} MB)")
 
         mime = "audio/mp3" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        user_text = self._build_transcript_prompt(transcript)
 
-        lines = []
-        for i, seg in enumerate(transcript.segments):
-            lines.append(f"[{i}] {seg.text.strip()}")
-        transcript_text = "\n".join(lines)
-
-        user_text = (
-            f"TRANSCRIÇÃO atual ({len(transcript.segments)} segmentos):\n\n"
-            f"{transcript_text}\n\n"
-            "Ouça o áudio anexado e devolva as correções no JSON especificado."
-        )
-
-        # Audio inline + texto = quase nada de input tokens, mas reservamos
-        # uma margem boa pelo lado da resposta JSON.
-        est_tokens = (
-            _estimate_tokens(SYSTEM_PROMPT)
-            + _estimate_tokens(user_text)
-            + int(size_mb * 1500)  # heurística áudio
-            + 4096
-        )
+        est_tokens = self._estimate_request_tokens(user_text, size_mb)
 
         payload_base = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
@@ -180,39 +163,7 @@ class TranscriptValidator:
             f"{len(transcript.segments)} segmentos)..."
         )
 
-        last_error: Exception | None = None
-        for model in self.models:
-            if not rate_limiter.acquire(model, est_tokens, max_wait=45.0):
-                logger.warning(f"[validator:{model}] sem capacidade. Próximo modelo.")
-                continue
-
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            try:
-                with httpx.Client(timeout=240.0) as client:
-                    resp = client.post(
-                        url,
-                        headers={
-                            "Content-Type": "application/json",
-                            "X-goog-api-key": self.api_key,
-                        },
-                        json=payload_base,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                rate_limiter.record(model, est_tokens)
-                break
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                if e.response.status_code == 429:
-                    logger.warning(f"[validator:{model}] 429. Próximo modelo.")
-                    continue
-                raise
-            except Exception as e:
-                last_error = e
-                logger.warning(f"[validator:{model}] erro: {e}. Próximo modelo.")
-                continue
-        else:
-            raise RuntimeError(f"Todos os modelos esgotaram. Último: {last_error}")
+        data = self._query_with_fallback(payload_base, est_tokens)
 
         candidates = data.get("candidates", [])
         if not candidates:
@@ -236,6 +187,60 @@ class TranscriptValidator:
             for c in parsed.get("corrections", [])
             if c.get("corrected_text", "").strip()
         ]
+
+    def _build_transcript_prompt(self, transcript: Transcript) -> str:
+        lines = [f"[{i}] {seg.text.strip()}" for i, seg in enumerate(transcript.segments)]
+        transcript_text = "\n".join(lines)
+        return (
+            f"TRANSCRIÇÃO atual ({len(transcript.segments)} segmentos):\n\n"
+            f"{transcript_text}\n\n"
+            "Ouça o áudio anexado e devolva as correções no JSON especificado."
+        )
+
+    def _estimate_request_tokens(self, user_text: str, size_mb: float) -> int:
+        return (
+            _estimate_tokens(SYSTEM_PROMPT)
+            + _estimate_tokens(user_text)
+            + int(size_mb * 1500)
+            + 4096
+        )
+
+    def _query_with_fallback(self, payload_base: dict, est_tokens: int) -> dict:
+        last_error: Exception | None = None
+        for model in self.models:
+            if not rate_limiter.acquire(model, est_tokens, max_wait=45.0):
+                logger.warning(f"[validator:{model}] sem capacidade. Próximo modelo.")
+                continue
+
+            try:
+                data = self._request_model(model, payload_base)
+                rate_limiter.record(model, est_tokens)
+                return data
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 429:
+                    logger.warning(f"[validator:{model}] 429. Próximo modelo.")
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[validator:{model}] erro: {e}. Próximo modelo.")
+                continue
+        raise RuntimeError(f"Todos os modelos esgotaram. Último: {last_error}")
+
+    def _request_model(self, model: str, payload_base: dict) -> dict:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        with httpx.Client(timeout=240.0) as client:
+            resp = client.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-goog-api-key": self.api_key,
+                },
+                json=payload_base,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
     def _apply_corrections(
         self, transcript: Transcript, corrections: list[_Correction]

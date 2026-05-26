@@ -145,35 +145,18 @@ class FaceTracker:
         cap.release()
 
         last_known: tuple[int, int] | None = None
-        for i, (ts, frame_obs) in enumerate(zip(timestamps, observations_per_t)):
-            if not frame_obs:
+        for i, (ts, frame_obs) in enumerate(
+            zip(timestamps, observations_per_t, strict=False)
+        ):
+            audio_e = audio_energy[i] if i < len(audio_energy) else 0.0
+            chosen, last_known = self._pick_speaker(frame_obs, audio_e, prev_lip_opens, last_known)
+            if chosen is None:
                 if last_known is not None:
                     trajectory.points.append(
                         CropPoint(timestamp=float(ts), x=last_known[0], y=last_known[1])
                     )
                 continue
-
-            if len(frame_obs) == 1:
-                chosen = frame_obs[0]
-            else:
-                audio_e = audio_energy[i] if i < len(audio_energy) else 0.0
-                best_score = -1.0
-                chosen = frame_obs[0]
-                for face_idx, obs in enumerate(frame_obs):
-                    prev = prev_lip_opens.get(face_idx, obs.lip_open)
-                    lip_activity = abs(obs.lip_open - prev)
-                    size_score = obs.bbox_w * obs.bbox_h
-                    speaker_score = lip_activity * audio_e * 1e6
-                    score = size_score * 0.3 + speaker_score
-                    if score > best_score:
-                        best_score = score
-                        chosen = obs
-
-            for face_idx, obs in enumerate(frame_obs):
-                prev_lip_opens[face_idx] = obs.lip_open
-
             trajectory.points.append(CropPoint(timestamp=float(ts), x=chosen.cx, y=chosen.cy))
-            last_known = (chosen.cx, chosen.cy)
 
         trajectory = self._smooth(trajectory, width, height)
 
@@ -198,6 +181,44 @@ class FaceTracker:
             faces.append((cx, cy, w, h))
         faces.sort(key=lambda f: f[2] * f[3], reverse=True)
         return faces
+
+    def _pick_speaker(
+        self,
+        frame_obs: list[_FaceObservation],
+        audio_e: float,
+        prev_lip_opens: dict[int, float],
+        last_known: tuple[int, int] | None,
+    ) -> tuple[_FaceObservation | None, tuple[int, int] | None]:
+        if not frame_obs:
+            return None, last_known
+
+        chosen = frame_obs[0]
+        if len(frame_obs) > 1:
+            chosen = self._choose_best_face(frame_obs, audio_e, prev_lip_opens)
+
+        for face_idx, obs in enumerate(frame_obs):
+            prev_lip_opens[face_idx] = obs.lip_open
+
+        return chosen, (chosen.cx, chosen.cy)
+
+    def _choose_best_face(
+        self,
+        frame_obs: list[_FaceObservation],
+        audio_e: float,
+        prev_lip_opens: dict[int, float],
+    ) -> _FaceObservation:
+        best_score = -1.0
+        chosen = frame_obs[0]
+        for face_idx, obs in enumerate(frame_obs):
+            prev = prev_lip_opens.get(face_idx, obs.lip_open)
+            lip_activity = abs(obs.lip_open - prev)
+            size_score = obs.bbox_w * obs.bbox_h
+            speaker_score = lip_activity * audio_e * 1e6
+            score = size_score * 0.3 + speaker_score
+            if score > best_score:
+                best_score = score
+                chosen = obs
+        return chosen
 
     def _lip_openness(self, landmarks) -> float:
         top_y = sum(landmarks[i].y for i in LIPS_TOP_IDX) / len(LIPS_TOP_IDX)
@@ -293,7 +314,7 @@ class FaceTracker:
             fallback_x=trajectory.fallback_x,
             fallback_y=trajectory.fallback_y,
         )
-        for p, xs_v, ys_v in zip(trajectory.points, xs_s, ys_s):
+        for p, xs_v, ys_v in zip(trajectory.points, xs_s, ys_s, strict=False):
             smoothed.points.append(
                 CropPoint(
                     timestamp=p.timestamp,
