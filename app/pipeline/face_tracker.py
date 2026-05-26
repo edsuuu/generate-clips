@@ -145,9 +145,7 @@ class FaceTracker:
         cap.release()
 
         last_known: tuple[int, int] | None = None
-        for i, (ts, frame_obs) in enumerate(
-            zip(timestamps, observations_per_t, strict=False)
-        ):
+        for i, (ts, frame_obs) in enumerate(zip(timestamps, observations_per_t, strict=False)):
             audio_e = audio_energy[i] if i < len(audio_energy) else 0.0
             chosen, last_known = self._pick_speaker(frame_obs, audio_e, prev_lip_opens, last_known)
             if chosen is None:
