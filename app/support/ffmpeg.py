@@ -56,8 +56,7 @@ def build_video_encode_profile() -> VideoEncodeProfile:
         if _supports_encoder("h264_nvenc"):
             return _nvenc_profile()
         logger.warning(
-            "FFMPEG_ENCODER=h264_nvenc, mas o encoder nao esta disponivel. "
-            "Caindo para libx264."
+            "FFMPEG_ENCODER=h264_nvenc, mas o encoder nao esta disponivel. Caindo para libx264."
         )
         return _libx264_profile()
 
@@ -65,8 +64,7 @@ def build_video_encode_profile() -> VideoEncodeProfile:
         return _libx264_profile()
 
     logger.warning(
-        f"FFMPEG_ENCODER={settings.ffmpeg_encoder!r} nao reconhecido. "
-        "Usando fallback libx264."
+        f"FFMPEG_ENCODER={settings.ffmpeg_encoder!r} nao reconhecido. Usando fallback libx264."
     )
     return _libx264_profile()
 
@@ -193,7 +191,7 @@ def _acquire_render_slot() -> tuple[Path, int, float]:
 def run_with_progress(
     cmd: list[str],
     total_seconds: float,
-    on_progress: Callable[[float], None] | None = None,
+    on_progress: Callable[[float], object] | None = None,
     cwd: Path | str | None = None,
     encoder: str | None = None,
     stage: str = "render",

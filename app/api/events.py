@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.support.logger import logger
@@ -53,7 +53,9 @@ class JobEventBus:
 bus = JobEventBus()
 
 
-def emit(job_id: str, stage: str, percent: float, message: str = "", **detail: Any) -> dict[str, Any]:
+def emit(
+    job_id: str, stage: str, percent: float, message: str = "", **detail: Any
+) -> dict[str, Any]:
     """Publica um evento de progresso no bus (SSE/WebSocket) e loga no terminal."""
     pct = round(float(percent), 1)
     event = {
@@ -62,7 +64,7 @@ def emit(job_id: str, stage: str, percent: float, message: str = "", **detail: A
         "percent": pct,
         "message": message,
         "detail": detail,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
     }
     bus.publish(job_id, event)
 

@@ -68,6 +68,7 @@ class VideoInfo:
 @dataclass
 class CropPoint:
     """Centro do crop em coordenadas do vídeo original, em um instante."""
+
     timestamp: float
     x: int
     y: int
@@ -76,6 +77,7 @@ class CropPoint:
 @dataclass
 class CropTrajectory:
     """Trajetória do crop para um segmento de vídeo."""
+
     points: list[CropPoint] = field(default_factory=list)
     fallback_x: int = 0  # centro padrão se trajetória vazia
     fallback_y: int = 0
@@ -91,7 +93,11 @@ class CropTrajectory:
         for i in range(len(self.points) - 1):
             a, b = self.points[i], self.points[i + 1]
             if a.timestamp <= t <= b.timestamp:
-                ratio = (t - a.timestamp) / (b.timestamp - a.timestamp) if b.timestamp > a.timestamp else 0
+                ratio = (
+                    (t - a.timestamp) / (b.timestamp - a.timestamp)
+                    if b.timestamp > a.timestamp
+                    else 0
+                )
                 x = int(a.x + (b.x - a.x) * ratio)
                 y = int(a.y + (b.y - a.y) * ratio)
                 return x, y

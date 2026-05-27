@@ -5,7 +5,6 @@ from app.support.ffmpeg import build_video_encode_profile, run_with_progress
 from app.support.logger import logger
 from app.support.types import Highlight, Transcript, Word
 
-
 # Estilo TikTok: branco com contorno preto grosso (Default), amarelo brilhante
 # escalado quando ativo (Highlight). Fonte Arial Black — disponível em macOS,
 # Windows e quase todas distros Linux modernas; libass resolve via fontconfig.
@@ -69,7 +68,7 @@ def _build_ass(words: list[Word]) -> str:
 
     for index, active in enumerate(words):
         window_start = max(0, index - WORDS_PER_FRAME + 1)
-        window = list(words[window_start:index + 1])
+        window = list(words[window_start : index + 1])
 
         # Quebra a janela se houve silencio perceptivel antes da fala atual.
         while len(window) > 1 and active.start - window[0].end > LONG_GAP_SECONDS:
@@ -92,15 +91,14 @@ def _build_ass(words: list[Word]) -> str:
         seg_end = max(seg_start + 0.01, seg_end)
 
         events.append(
-            f"Dialogue: 0,{_format_ts(seg_start)},{_format_ts(seg_end)},"
-            f"Default,,0,0,0,,{line}"
+            f"Dialogue: 0,{_format_ts(seg_start)},{_format_ts(seg_end)},Default,,0,0,0,,{line}"
         )
 
     return ASS_HEADER + "\n".join(events) + "\n"
 
 
 class Subtitler:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def burn_subtitles(
@@ -109,7 +107,7 @@ class Subtitler:
         transcript: Transcript,
         highlight: Highlight,
         out_path: Path,
-        on_progress: Callable[[float], None] | None = None,
+        on_progress: Callable[[float], object] | None = None,
     ) -> Path:
         words = _collect_words_in_range(transcript, highlight.start, highlight.end)
         if not words:
@@ -129,11 +127,17 @@ class Subtitler:
         # de escape no filtro subtitles (que usa ':' como separador interno).
         cwd = ass_path.parent
         cmd = [
-            "ffmpeg", "-y", "-i", video_path.name,
-            "-vf", f"subtitles=filename={ass_path.name}",
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path.name,
+            "-vf",
+            f"subtitles=filename={ass_path.name}",
             *encode_profile.args,
-            "-c:a", "copy",
-            "-movflags", "+faststart",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
             out_path.name,
         ]
         run_with_progress(

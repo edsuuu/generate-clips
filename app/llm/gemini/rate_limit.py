@@ -18,25 +18,23 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
 
 from app.llm.gemini.models import normalize_model_name
 from app.support.logger import logger
 
-
 # Defaults baseados na tabela pública atual do Gemini API.
 # RPM = requests/minute, TPM = tokens/minute, RPD = requests/day
 DEFAULT_LIMITS: dict[str, dict[str, int]] = {
-    "gemini-flash-latest":       {"rpm": 10, "tpm": 250_000, "rpd": 250},
-    "gemini-2.5-pro":            {"rpm": 5,  "tpm": 250_000, "rpd": 100},
-    "gemini-2.5-flash":          {"rpm": 10, "tpm": 250_000, "rpd": 250},
-    "gemini-2.5-flash-preview":  {"rpm": 10, "tpm": 250_000, "rpd": 250},
-    "gemini-2.5-flash-lite":     {"rpm": 15, "tpm": 250_000, "rpd": 1_000},
-    "gemini-2.0-flash":          {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
-    "gemini-2.0-flash-lite":     {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
+    "gemini-flash-latest": {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-pro": {"rpm": 5, "tpm": 250_000, "rpd": 100},
+    "gemini-2.5-flash": {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-flash-preview": {"rpm": 10, "tpm": 250_000, "rpd": 250},
+    "gemini-2.5-flash-lite": {"rpm": 15, "tpm": 250_000, "rpd": 1_000},
+    "gemini-2.0-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
+    "gemini-2.0-flash-lite": {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
     # Aliases praticos aceitos no projeto.
-    "gemini-2-flash":            {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
-    "gemini-2-flash-lite":       {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
+    "gemini-2-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 200},
+    "gemini-2-flash-lite": {"rpm": 30, "tpm": 1_000_000, "rpd": 200},
 }
 
 
@@ -48,8 +46,7 @@ def get_limits() -> dict[str, dict[str, int]]:
         try:
             extra = json.loads(override)
             normalized_extra = {
-                normalize_model_name(model): values
-                for model, values in extra.items()
+                normalize_model_name(model): values for model, values in extra.items()
             }
             return {**limits, **normalized_extra}
         except Exception as e:
@@ -60,8 +57,8 @@ def get_limits() -> dict[str, dict[str, int]]:
 @dataclass
 class _ModelState:
     requests_minute: deque = field(default_factory=deque)  # timestamps (s) últimos 60s
-    tokens_minute: deque = field(default_factory=deque)    # (ts, tokens) últimos 60s
-    requests_day: deque = field(default_factory=deque)     # timestamps últimos 86400s
+    tokens_minute: deque = field(default_factory=deque)  # (ts, tokens) últimos 60s
+    requests_day: deque = field(default_factory=deque)  # timestamps últimos 86400s
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -96,7 +93,7 @@ class GeminiRateLimiter:
     def _tokens_in_minute(self, st: _ModelState) -> int:
         return sum(tk for _, tk in st.tokens_minute)
 
-    def can_acquire(self, model: str, est_tokens: int) -> tuple[bool, Optional[float], str]:
+    def can_acquire(self, model: str, est_tokens: int) -> tuple[bool, float | None, str]:
         """Verifica sem aguardar. Retorna (ok, wait_seconds, reason)."""
         limits = self._model_limits(model)
         st = self._state(model)
@@ -118,8 +115,10 @@ class GeminiRateLimiter:
             if tpm_used + est_tokens > limits["tpm"]:
                 if st.tokens_minute:
                     wait = 60 - (now - st.tokens_minute[0][0]) + 0.1
-                    return False, max(wait, 0.5), (
-                        f"TPM próximo do limite ({tpm_used}+{est_tokens} > {limits['tpm']})"
+                    return (
+                        False,
+                        max(wait, 0.5),
+                        (f"TPM próximo do limite ({tpm_used}+{est_tokens} > {limits['tpm']})"),
                     )
                 return False, 60.0, "TPM excedido"
 

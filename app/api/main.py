@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +52,7 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health():
+def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
@@ -62,7 +64,7 @@ def _require_python_token(authorization: str | None = Header(default=None)) -> N
         raise HTTPException(status_code=401, detail="Token invalido")
 
 
-def _run_background(target, *args) -> str:
+def _run_background(target: Callable[..., Any], *args: Any) -> str:
     job_id = new_job_id()
 
     def runner() -> None:
@@ -101,7 +103,7 @@ def post_subtitle_full(video_id: str, payload: SubtitleFullRequest) -> AcceptedJ
     "/videos/{video_id}/recommend-cuts",
     dependencies=[Depends(_require_python_token)],
 )
-def post_recommend_cuts(video_id: str, payload: RecommendCutsRequest):
+def post_recommend_cuts(video_id: str, payload: RecommendCutsRequest) -> dict[str, Any]:
     # Síncrono: a recomendação via LLM é rápida e o Laravel quer a resposta na hora.
     return recommend_cuts(video_id, payload)
 
@@ -118,14 +120,14 @@ def post_render_cuts(video_id: str, payload: RenderCutsRequest) -> AcceptedJobOu
 
 
 @app.get("/jobs/{job_id}/events")
-async def job_events(job_id: str):
+async def job_events(job_id: str) -> EventSourceResponse:
     """SSE — progresso em tempo real do job (relay em memória, sem DB).
 
     Cliente: EventSource(url) no browser ou `curl -N <url>`.
     """
     queue = bus.subscribe(job_id)
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
         snap = bus.snapshot(job_id)
         if snap is not None:
             yield {"event": "snapshot", "data": json.dumps(snap)}
@@ -133,7 +135,7 @@ async def job_events(job_id: str):
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield {"event": "ping", "data": ""}
                     continue
                 yield {"event": event.get("stage", "progress"), "data": json.dumps(event)}
@@ -146,7 +148,7 @@ async def job_events(job_id: str):
 
 
 @app.websocket("/jobs/{job_id}/ws")
-async def job_ws(websocket: WebSocket, job_id: str):
+async def job_ws(websocket: WebSocket, job_id: str) -> None:
     await websocket.accept()
 
     snap = bus.snapshot(job_id)
@@ -158,7 +160,7 @@ async def job_ws(websocket: WebSocket, job_id: str):
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await websocket.send_json({"type": "ping"})
                 continue
             await websocket.send_json({"type": "progress", **event})

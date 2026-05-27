@@ -1,10 +1,9 @@
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from faster_whisper import WhisperModel
-
-from app.support.logger import logger
 from app.support.config import settings
+from app.support.logger import logger
 from app.support.types import Segment, Transcript, Word
 
 
@@ -31,14 +30,14 @@ def _resolve_device_and_compute() -> tuple[str, str]:
 
 class Transcriber:
     def __init__(self, model_name: str | None = None):
+        from faster_whisper import WhisperModel
+
         self.model_name = model_name or settings.whisper_model
         device, compute_type = _resolve_device_and_compute()
         logger.info(
             f"Carregando Whisper {self.model_name} (device={device}, compute={compute_type})"
         )
-        self.model = WhisperModel(
-            self.model_name, device=device, compute_type=compute_type
-        )
+        self.model = WhisperModel(self.model_name, device=device, compute_type=compute_type)
 
     def _extract_audio(self, video_path: Path) -> Path:
         audio_path = video_path.with_suffix(".wav")
@@ -47,16 +46,27 @@ class Transcriber:
 
         logger.info("Extraindo áudio do vídeo...")
         cmd = [
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-c:a", "pcm_s16le", str(audio_path),
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(audio_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg falhou: {result.stderr}")
         return audio_path
 
-    def transcribe(self, video_path: Path, on_progress=None) -> Transcript:
+    def transcribe(
+        self, video_path: Path, on_progress: Callable[[float], object] | None = None
+    ) -> Transcript:
         audio_path = self._extract_audio(video_path)
 
         logger.info(

@@ -1,0 +1,25 @@
+name: Auto Merge
+
+# Marca todo PR (não-draft) para auto-merge via squash. O GitHub só mescla
+# de fato quando os checks obrigatórios da branch (ex.: o job "lint") passam.
+# Requer: "Allow auto-merge" ligado no repo + branch protection na main
+# exigindo o check "lint".
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}

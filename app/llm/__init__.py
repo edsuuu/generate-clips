@@ -40,25 +40,26 @@ def get_provider(name: str | None = None) -> LLMProvider:
 
     if name in {"local", "ollama"}:
         from app.llm.ollama import OllamaProvider
+
         return OllamaProvider()
     if name in {"gemini", "google"}:
         from app.llm.gemini import GeminiProvider
+
         return GeminiProvider()
     if name == "auto":
         return _build_auto_provider()
 
-    raise ValueError(
-        f"Provider '{name}' desconhecido. Use: local, gemini, auto"
-    )
+    raise ValueError(f"Provider '{name}' desconhecido. Use: local, gemini, auto")
 
 
 def _build_auto_provider() -> LLMProvider:
     """Tenta construir Gemini como primário; se sem chave, retorna local direto."""
-    from app.llm.ollama import OllamaProvider
     from app.llm.auto import AutoProvider
+    from app.llm.ollama import OllamaProvider
 
     try:
         from app.llm.gemini import GeminiProvider
+
         primary = GeminiProvider()
     except (ValueError, ImportError) as e:
         logger.warning(f"Gemini indisponível ({e}). Usando Ollama local direto.")

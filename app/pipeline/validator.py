@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import os
-
 import httpx
 
-from app.llm.gemini import MULTIMODAL_MODEL_POOL, build_model_cascade, limiter as rate_limiter
+from app.llm.gemini import MULTIMODAL_MODEL_POOL, build_model_cascade
+from app.llm.gemini import limiter as rate_limiter
 from app.support.config import settings
 from app.support.logger import logger
 from app.support.types import Segment, Transcript, Word
@@ -80,8 +80,7 @@ class TranscriptValidator:
         if fallback_models is None:
             env_cascade = os.environ.get("GEMINI_MULTIMODAL_FALLBACKS", "").strip()
             fallback_models = (
-                [m.strip() for m in env_cascade.split(",") if m.strip()]
-                if env_cascade else None
+                [m.strip() for m in env_cascade.split(",") if m.strip()] if env_cascade else None
             )
         self.models = build_model_cascade(primary, fallback_models, MULTIMODAL_MODEL_POOL)
 
@@ -106,9 +105,18 @@ class TranscriptValidator:
         """Comprime para MP3 mono 24kbps — fica leve para envio inline (~3KB/s)."""
         out = audio_path.with_name(audio_path.stem + ".validate.mp3")
         cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ac", "1", "-ar", "16000",
-            "-c:a", "libmp3lame", "-b:a", "24k",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "24k",
             str(out),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -124,39 +132,26 @@ class TranscriptValidator:
             raise ValueError(f"Áudio muito grande para envio inline ({size_mb:.1f} MB)")
 
         mime = "audio/mp3" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        user_text = self._build_transcript_prompt(transcript)
 
-        lines = []
-        for i, seg in enumerate(transcript.segments):
-            lines.append(f"[{i}] {seg.text.strip()}")
-        transcript_text = "\n".join(lines)
-
-        user_text = (
-            f"TRANSCRIÇÃO atual ({len(transcript.segments)} segmentos):\n\n"
-            f"{transcript_text}\n\n"
-            "Ouça o áudio anexado e devolva as correções no JSON especificado."
-        )
-
-        # Audio inline + texto = quase nada de input tokens, mas reservamos
-        # uma margem boa pelo lado da resposta JSON.
-        est_tokens = (
-            _estimate_tokens(SYSTEM_PROMPT)
-            + _estimate_tokens(user_text)
-            + int(size_mb * 1500)  # heurística áudio
-            + 4096
-        )
+        est_tokens = self._estimate_request_tokens(user_text, size_mb)
 
         payload_base = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{
-                "role": "user",
-                "parts": [
-                    {"inline_data": {
-                        "mime_type": mime,
-                        "data": base64.b64encode(audio_bytes).decode("ascii"),
-                    }},
-                    {"text": user_text},
-                ],
-            }],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": mime,
+                                "data": base64.b64encode(audio_bytes).decode("ascii"),
+                            }
+                        },
+                        {"text": user_text},
+                    ],
+                }
+            ],
             "generationConfig": {
                 "temperature": 0.1,
                 "responseMimeType": "application/json",
@@ -168,39 +163,7 @@ class TranscriptValidator:
             f"{len(transcript.segments)} segmentos)..."
         )
 
-        last_error: Exception | None = None
-        for model in self.models:
-            if not rate_limiter.acquire(model, est_tokens, max_wait=45.0):
-                logger.warning(f"[validator:{model}] sem capacidade. Próximo modelo.")
-                continue
-
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            try:
-                with httpx.Client(timeout=240.0) as client:
-                    resp = client.post(
-                        url,
-                        headers={
-                            "Content-Type": "application/json",
-                            "X-goog-api-key": self.api_key,
-                        },
-                        json=payload_base,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                rate_limiter.record(model, est_tokens)
-                break
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                if e.response.status_code == 429:
-                    logger.warning(f"[validator:{model}] 429. Próximo modelo.")
-                    continue
-                raise
-            except Exception as e:
-                last_error = e
-                logger.warning(f"[validator:{model}] erro: {e}. Próximo modelo.")
-                continue
-        else:
-            raise RuntimeError(f"Todos os modelos esgotaram. Último: {last_error}")
+        data = self._query_with_fallback(payload_base, est_tokens)
 
         candidates = data.get("candidates", [])
         if not candidates:
@@ -225,6 +188,61 @@ class TranscriptValidator:
             if c.get("corrected_text", "").strip()
         ]
 
+    def _build_transcript_prompt(self, transcript: Transcript) -> str:
+        lines = [f"[{i}] {seg.text.strip()}" for i, seg in enumerate(transcript.segments)]
+        transcript_text = "\n".join(lines)
+        return (
+            f"TRANSCRIÇÃO atual ({len(transcript.segments)} segmentos):\n\n"
+            f"{transcript_text}\n\n"
+            "Ouça o áudio anexado e devolva as correções no JSON especificado."
+        )
+
+    def _estimate_request_tokens(self, user_text: str, size_mb: float) -> int:
+        return (
+            _estimate_tokens(SYSTEM_PROMPT)
+            + _estimate_tokens(user_text)
+            + int(size_mb * 1500)
+            + 4096
+        )
+
+    def _query_with_fallback(self, payload_base: dict, est_tokens: int) -> dict:
+        last_error: Exception | None = None
+        for model in self.models:
+            if not rate_limiter.acquire(model, est_tokens, max_wait=45.0):
+                logger.warning(f"[validator:{model}] sem capacidade. Próximo modelo.")
+                continue
+
+            try:
+                data = self._request_model(model, payload_base)
+                rate_limiter.record(model, est_tokens)
+                return data
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 429:
+                    logger.warning(f"[validator:{model}] 429. Próximo modelo.")
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[validator:{model}] erro: {e}. Próximo modelo.")
+                continue
+        raise RuntimeError(f"Todos os modelos esgotaram. Último: {last_error}")
+
+    def _request_model(self, model: str, payload_base: dict) -> dict:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        with httpx.Client(timeout=240.0) as client:
+            resp = client.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-goog-api-key": self.api_key,
+                },
+                json=payload_base,
+            )
+            resp.raise_for_status()
+            data: dict = resp.json()
+            return data
+
     def _apply_corrections(
         self, transcript: Transcript, corrections: list[_Correction]
     ) -> Transcript:
@@ -240,12 +258,14 @@ class TranscriptValidator:
                 continue
             new_text = index_to_corr[i].corrected_text
             new_words = self._redistribute_words(seg, new_text)
-            new_segments.append(Segment(
-                text=new_text,
-                start=seg.start,
-                end=seg.end,
-                words=new_words,
-            ))
+            new_segments.append(
+                Segment(
+                    text=new_text,
+                    start=seg.start,
+                    end=seg.end,
+                    words=new_words,
+                )
+            )
 
         return Transcript(
             language=transcript.language,
