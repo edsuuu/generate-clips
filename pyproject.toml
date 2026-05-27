@@ -71,11 +71,10 @@ disallow_incomplete_defs = true
 [[tool.mypy.overrides]]
 module = [
     "faster_whisper.*",
-    "ffmpeg.*",
-    "librosa.*",
     "mediapipe.*",
     "cv2.*",
     "scipy.*",
     "minio.*",
+    "yt_dlp.*",
 ]
 ignore_missing_imports = true

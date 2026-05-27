@@ -8,6 +8,7 @@ Suporta dois modos:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2  # type: ignore
 import numpy as np
@@ -15,6 +16,9 @@ import numpy as np
 from app.support.ffmpeg import build_video_encode_profile, run_with_progress
 from app.support.logger import logger
 from app.support.types import CropTrajectory, Cut, Highlight, VideoInfo
+
+if TYPE_CHECKING:
+    from app.pipeline.face_tracker import FaceTracker
 
 TARGET_W = 1080
 TARGET_H = 1920
@@ -25,8 +29,8 @@ class Cutter:
         self,
         output_dir: Path,
         vertical: bool = True,
-        face_tracker=None,
-    ):
+        face_tracker: FaceTracker | None = None,
+    ) -> None:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.vertical = vertical
@@ -151,7 +155,7 @@ class Cutter:
 
         # Escreve frames em arquivo temporário (sem áudio); depois faz mux com ffmpeg.
         tmp_video = out_path.with_suffix(".novideo.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
         writer = cv2.VideoWriter(str(tmp_video), fourcc, fps, (TARGET_W, TARGET_H))
 
         start_frame = int(highlight.start * fps)

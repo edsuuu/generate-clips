@@ -1,5 +1,8 @@
+import json
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
@@ -39,7 +42,7 @@ class Downloader:
         self,
         url: str,
         video_format: str = BEST_QUALITY_FORMAT,
-        on_progress=None,
+        on_progress: Callable[[float], object] | None = None,
     ) -> VideoInfo:
         # Atalho de cache: se conseguimos extrair o video_id da URL e já temos
         # o arquivo + metadata salvos, retorna sem bater no YouTube.
@@ -112,8 +115,10 @@ class Downloader:
         )
 
     @staticmethod
-    def _make_hook(on_progress):
-        def hook(d: dict) -> None:
+    def _make_hook(
+        on_progress: Callable[[float], object],
+    ) -> Callable[[dict[str, Any]], None]:
+        def hook(d: dict[str, Any]) -> None:
             if d.get("status") != "downloading":
                 return
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -134,21 +139,18 @@ class Downloader:
         return None
 
     @staticmethod
-    def _load_cached_meta(video_dir: Path) -> dict | None:
+    def _load_cached_meta(video_dir: Path) -> dict[str, Any] | None:
         meta_file = video_dir / "meta.json"
         if not meta_file.is_file():
             return None
-        import json
-
         try:
-            return json.loads(meta_file.read_text(encoding="utf-8"))
+            meta: dict[str, Any] = json.loads(meta_file.read_text(encoding="utf-8"))
+            return meta
         except Exception:
             return None
 
     @staticmethod
     def _save_meta(video_dir: Path, title: str, duration: float) -> None:
-        import json
-
         (video_dir / "meta.json").write_text(
             json.dumps({"title": title, "duration": duration}, ensure_ascii=False),
             encoding="utf-8",

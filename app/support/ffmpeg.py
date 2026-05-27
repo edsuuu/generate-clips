@@ -191,7 +191,7 @@ def _acquire_render_slot() -> tuple[Path, int, float]:
 def run_with_progress(
     cmd: list[str],
     total_seconds: float,
-    on_progress: Callable[[float], None] | None = None,
+    on_progress: Callable[[float], object] | None = None,
     cwd: Path | str | None = None,
     encoder: str | None = None,
     stage: str = "render",

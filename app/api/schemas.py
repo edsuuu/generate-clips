@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 class CallbackMixin(BaseModel):
@@ -58,6 +58,12 @@ class RecommendCutsRequest(CallbackMixin):
     constraints: CutConstraints = Field(default_factory=CutConstraints)
     user_prompt: str | None = None
     llm: str | None = None
+
+    @model_validator(mode="after")
+    def _require_transcript_source(self) -> RecommendCutsRequest:
+        if not self.transcript_json and not (self.transcript_text or "").strip():
+            raise ValueError("Informe transcript_json ou transcript_text")
+        return self
 
 
 class RenderCutRequest(BaseModel):

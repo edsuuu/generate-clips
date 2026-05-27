@@ -28,4 +28,5 @@ class OllamaProvider(LLMProvider):
             resp = client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
-        return data["message"]["content"]
+        content: str = data["message"]["content"]
+        return content

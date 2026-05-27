@@ -19,7 +19,7 @@ def _sha256(path: Path) -> str:
 
 
 class MinioStorageProvider:
-    def __init__(self):
+    def __init__(self) -> None:
         from minio import Minio
 
         parsed = urlparse(settings.minio_endpoint)
@@ -70,8 +70,9 @@ class MinioStorageProvider:
         return local_path
 
     def presigned_get_url(self, object_path: str, expires_seconds: int = 3600) -> str:
-        return self.client.presigned_get_object(
+        url: str = self.client.presigned_get_object(
             self.bucket,
             object_path,
             expires=timedelta(seconds=expires_seconds),
         )
+        return url

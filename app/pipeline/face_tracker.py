@@ -19,6 +19,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # Reduz ruído nativo de MediaPipe/TFLite no stderr do processo.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -145,7 +146,7 @@ class FaceTracker:
         cap.release()
 
         last_known: tuple[int, int] | None = None
-        for i, (ts, frame_obs) in enumerate(zip(timestamps, observations_per_t, strict=False)):
+        for i, (ts, frame_obs) in enumerate(zip(timestamps, observations_per_t, strict=True)):
             audio_e = audio_energy[i] if i < len(audio_energy) else 0.0
             chosen, last_known = self._pick_speaker(frame_obs, audio_e, prev_lip_opens, last_known)
             if chosen is None:
@@ -163,7 +164,9 @@ class FaceTracker:
         )
         return trajectory
 
-    def _detect_faces(self, mp_image, width: int, height: int) -> list[tuple[int, int, int, int]]:
+    def _detect_faces(
+        self, mp_image: Any, width: int, height: int
+    ) -> list[tuple[int, int, int, int]]:
         result = self._face_detector.detect(mp_image)
         if not result.detections:
             return []
@@ -218,7 +221,7 @@ class FaceTracker:
                 chosen = obs
         return chosen
 
-    def _lip_openness(self, landmarks) -> float:
+    def _lip_openness(self, landmarks: Any) -> float:
         top_y = sum(landmarks[i].y for i in LIPS_TOP_IDX) / len(LIPS_TOP_IDX)
         bot_y = sum(landmarks[i].y for i in LIPS_BOTTOM_IDX) / len(LIPS_BOTTOM_IDX)
         return float(abs(bot_y - top_y))
@@ -258,7 +261,7 @@ class FaceTracker:
                 "pcm_s16le",
                 "pipe:1",
             ]
-            result = subprocess.run(cmd, capture_output=True, check=False)
+            result = subprocess.run(cmd, capture_output=True, check=False, timeout=300)
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(stderr or "ffmpeg retornou erro ao extrair áudio")
@@ -283,10 +286,10 @@ class FaceTracker:
             else:
                 energies.append(float(np.sqrt(np.mean(chunk**2))))
 
-        e = np.array(energies)
-        if e.max() > 0:
-            e = e / e.max()
-        return e
+        energy = np.array(energies)
+        if energy.max() > 0:
+            energy = energy / energy.max()
+        return energy
 
     def _smooth(self, trajectory: CropTrajectory, width: int, height: int) -> CropTrajectory:
         if len(trajectory.points) < 5:
@@ -312,7 +315,7 @@ class FaceTracker:
             fallback_x=trajectory.fallback_x,
             fallback_y=trajectory.fallback_y,
         )
-        for p, xs_v, ys_v in zip(trajectory.points, xs_s, ys_s, strict=False):
+        for p, xs_v, ys_v in zip(trajectory.points, xs_s, ys_s, strict=True):
             smoothed.points.append(
                 CropPoint(
                     timestamp=p.timestamp,

@@ -98,7 +98,7 @@ def _build_ass(words: list[Word]) -> str:
 
 
 class Subtitler:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def burn_subtitles(
@@ -107,7 +107,7 @@ class Subtitler:
         transcript: Transcript,
         highlight: Highlight,
         out_path: Path,
-        on_progress: Callable[[float], None] | None = None,
+        on_progress: Callable[[float], object] | None = None,
     ) -> Path:
         words = _collect_words_in_range(transcript, highlight.start, highlight.end)
         if not words:

@@ -240,7 +240,8 @@ class TranscriptValidator:
                 json=payload_base,
             )
             resp.raise_for_status()
-            return resp.json()
+            data: dict = resp.json()
+            return data
 
     def _apply_corrections(
         self, transcript: Transcript, corrections: list[_Correction]

@@ -1,4 +1,5 @@
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from app.support.config import settings
@@ -63,7 +64,9 @@ class Transcriber:
             raise RuntimeError(f"ffmpeg falhou: {result.stderr}")
         return audio_path
 
-    def transcribe(self, video_path: Path, on_progress=None) -> Transcript:
+    def transcribe(
+        self, video_path: Path, on_progress: Callable[[float], object] | None = None
+    ) -> Transcript:
         audio_path = self._extract_audio(video_path)
 
         logger.info(

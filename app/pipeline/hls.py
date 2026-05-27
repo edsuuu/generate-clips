@@ -19,7 +19,7 @@ class HlsPackager:
         source_path: Path,
         output_dir: Path,
         total_seconds: float,
-        on_progress: Callable[[float], None] | None = None,
+        on_progress: Callable[[float], object] | None = None,
     ) -> HlsPackage:
         output_dir.mkdir(parents=True, exist_ok=True)
         master_playlist = output_dir / "master.m3u8"

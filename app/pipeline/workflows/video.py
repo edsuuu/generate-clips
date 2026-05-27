@@ -97,8 +97,9 @@ def _upload_hls_package(
     storage: MinioStorageProvider,
     video_id: str,
     package_dir: Path,
+    prefix: str = "hls",
 ) -> dict[str, Any]:
-    root_prefix = _object_path(video_id, "hls")
+    root_prefix = _object_path(video_id, prefix)
     master_file: dict[str, Any] | None = None
 
     for file_path in sorted(package_dir.rglob("*")):
@@ -246,6 +247,23 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
 
         raw_payload = _transcript_to_payload(transcript) if transcript else None
         validated_payload = _transcript_to_payload(validated) if validated else None
+        payloads: list[dict[str, Any]] = [
+            {
+                "type": "ingest_result",
+                "payload": {
+                    "video": {
+                        "external_video_id": video.video_id,
+                        "url": video.url,
+                        "title": video.title,
+                        "duration_seconds": video.duration,
+                    }
+                },
+            },
+        ]
+        if raw_payload:
+            payloads.append({"type": "transcript_raw", "payload": raw_payload})
+        if validated_payload:
+            payloads.append({"type": "transcript_validated", "payload": validated_payload})
         result = {
             "job_id": job_id,
             "video_id": payload.video_id,
@@ -268,26 +286,8 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
                 "validated_text": validated.full_text if validated else None,
                 "is_validated_by_ai": validated is not None,
             },
-            "payloads": [
-                {
-                    "type": "ingest_result",
-                    "payload": {
-                        "video": {
-                            "external_video_id": video.video_id,
-                            "url": video.url,
-                            "title": video.title,
-                            "duration_seconds": video.duration,
-                        }
-                    },
-                },
-            ],
+            "payloads": payloads,
         }
-        if raw_payload:
-            result["payloads"].append({"type": "transcript_raw", "payload": raw_payload})
-        if validated_payload:
-            result["payloads"].append(
-                {"type": "transcript_validated", "payload": validated_payload}
-            )
 
         emit(job_id, "done", 100, "Ingestão concluída")
         _post_webhook(
@@ -349,7 +349,9 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             file_type="legendado",
             content_type="video/mp4",
         ).to_dict()
-        hls_master = _upload_hls_package(storage, video_id, hls_package.output_dir)
+        hls_master = _upload_hls_package(
+            storage, video_id, hls_package.output_dir, prefix="hls-subtitled"
+        )
         result = {
             "job_id": job_id,
             "video_id": video_id,
