@@ -434,7 +434,9 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
     temp_dir = _job_temp_dir(job_id)
     storage = MinioStorageProvider()
     try:
+        emit(job_id, "start", 1, "Preparando renderização...")
         source_ext = Path(payload.source_file.path).suffix or ".mp4"
+        emit(job_id, "download", 3, "Baixando vídeo do MinIO...")
         source_path = storage.download_file(
             payload.source_file.path, temp_dir / f"source{source_ext}"
         )
