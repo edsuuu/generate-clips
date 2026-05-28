@@ -7,8 +7,9 @@ import platform
 import re
 import shlex
 import subprocess
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -126,6 +127,55 @@ def _supports_encoder(name: str) -> bool:
     return name in _available_encoders()
 
 
+@lru_cache(maxsize=1)
+def _available_hwaccels() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return set()
+
+    output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    accels: set[str] = set()
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith("hardware acceleration"):
+            continue
+        accels.add(stripped)
+    return accels
+
+
+@lru_cache(maxsize=1)
+def build_decode_args() -> tuple[str, ...]:
+    """Args de decode por hardware, inseridos antes do `-i` de entrada.
+
+    Offload do decode para a GPU (VideoToolbox no macOS). Sem
+    `-hwaccel_output_format`, os frames voltam para a memória do sistema, o que
+    mantém compatibilidade com filtros de software (ex.: `subtitles`/libass).
+    """
+    requested = settings.ffmpeg_hwaccel.strip().lower() or "auto"
+
+    if requested in ("none", "off", "cpu", "false"):
+        return ()
+
+    if requested == "auto":
+        if platform.system() == "Darwin" and "videotoolbox" in _available_hwaccels():
+            return ("-hwaccel", "videotoolbox")
+        return ()
+
+    if requested in _available_hwaccels():
+        return ("-hwaccel", requested)
+
+    logger.warning(
+        f"FFMPEG_HWACCEL={settings.ffmpeg_hwaccel!r} indisponivel; decode seguira em CPU."
+    )
+    return ()
+
+
 def _io_summary(cmd: list[str]) -> tuple[list[str], str]:
     inputs: list[str] = []
     for idx, token in enumerate(cmd[:-1]):
@@ -188,6 +238,26 @@ def _acquire_render_slot() -> tuple[Path, int, float]:
         time.sleep(0.25)
 
 
+def _start_frame_writer(proc: subprocess.Popen, frames: Iterator[bytes]) -> threading.Thread:
+    """Escreve frames crus no stdin do ffmpeg numa thread e fecha o pipe ao fim."""
+
+    def _pump() -> None:
+        try:
+            for chunk in frames:
+                proc.stdin.write(chunk)  # type: ignore[union-attr]
+        except (BrokenPipeError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()  # type: ignore[union-attr]
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=_pump, daemon=True)
+    thread.start()
+    return thread
+
+
 def run_with_progress(
     cmd: list[str],
     total_seconds: float,
@@ -195,12 +265,20 @@ def run_with_progress(
     cwd: Path | str | None = None,
     encoder: str | None = None,
     stage: str = "render",
+    stdin_frames: Iterator[bytes] | None = None,
 ) -> None:
-    """Roda ffmpeg e chama on_progress(percent 0-100) conforme avanca."""
+    """Roda ffmpeg e chama on_progress(percent 0-100) conforme avanca.
+
+    Se `stdin_frames` for fornecido, ffmpeg le video cru de `pipe:0`: os frames
+    sao escritos em uma thread enquanto o progresso e lido de `pipe:1`. Use para
+    enviar frames OpenCV direto ao encoder de hardware, sem arquivo intermediario
+    nem re-encode em software.
+    """
 
     full = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
     inputs, output = _io_summary(cmd)
     selected_encoder = encoder or "desconhecido"
+    piping = stdin_frames is not None
     slot_path, slot_index, wait_seconds = _acquire_render_slot()
     try:
         started_at = datetime.now().isoformat(timespec="seconds")
@@ -211,31 +289,52 @@ def run_with_progress(
             f"output={output} cmd={shlex.join(cmd)}"
         )
 
+        # Em modo pipe, stdin recebe bytes crus -> processo em modo binario e
+        # decodificamos as linhas de progresso manualmente.
         proc = subprocess.Popen(
             full,
+            stdin=subprocess.PIPE if piping else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            text=not piping,
+            bufsize=0 if piping else 1,
             cwd=str(cwd) if cwd else None,
         )
 
+        writer = _start_frame_writer(proc, stdin_frames) if stdin_frames is not None else None
+
         last_pct = -1.0
+        last_logged_pct = -1.0
         assert proc.stdout is not None
-        for line in proc.stdout:
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", "ignore") if piping else raw
             match = _OUT_TIME_RE.search(line)
-            if match and total_seconds > 0 and on_progress is not None:
+            if match and total_seconds > 0:
                 h, m, s = match.groups()
                 current = int(h) * 3600 + int(m) * 60 + float(s)
                 pct = min(99.0, current / total_seconds * 100.0)
                 if pct - last_pct >= 1.0:
                     last_pct = pct
-                    on_progress(pct)
-            elif line.startswith("progress=end") and on_progress is not None:
-                on_progress(100.0)
+                    if on_progress is not None:
+                        on_progress(pct)
+                if pct - last_logged_pct >= 10.0:
+                    last_logged_pct = pct
+                    logger.info(
+                        f"[ffmpeg:{stage}] progresso={pct:5.1f}% "
+                        f"({current:.1f}s/{total_seconds:.1f}s)"
+                    )
+            elif line.startswith("progress=end"):
+                if on_progress is not None:
+                    on_progress(100.0)
+                logger.info(f"[ffmpeg:{stage}] progresso=100.0%")
 
+        if writer is not None:
+            writer.join()
         returncode = proc.wait()
-        stderr = proc.stderr.read() if proc.stderr else ""
+        stderr_raw = proc.stderr.read() if proc.stderr else ""
+        stderr = (
+            stderr_raw.decode("utf-8", "ignore") if isinstance(stderr_raw, bytes) else stderr_raw
+        )
         finished_at = datetime.now().isoformat(timespec="seconds")
         elapsed = time.monotonic() - render_start
 

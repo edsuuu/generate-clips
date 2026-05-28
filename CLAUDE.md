@@ -27,7 +27,7 @@ lsof -ti :8765 | xargs kill -9; .venv/bin/python main.py
 curl -sN http://localhost:8765/jobs/<job_id>/events
 ```
 
-A API **não usa banco**. Persistência fica em arquivos locais (`output/`) + MinIO. Para o modo API, MinIO precisa estar acessível (default `http://127.0.0.1:9000`, bucket `auto-post`):
+A API **não usa banco**. Cada job grava arquivos efêmeros em `settings.temp_dir` (`/tmp/auto-post/<job_id>/`, limpo no fim) e sobe o que é durável pro MinIO. Para o modo API, MinIO precisa estar acessível (default `http://127.0.0.1:9000`, bucket `auto-post`):
 
 ```bash
 docker run -d -p 9000:9000 -p 9001:9001 --name minio \
@@ -50,10 +50,10 @@ O entry point `main.py` (raiz) só sobe o uvicorn apontando para `app.api.main:a
 
 ### Camadas independentes
 
-- **`app/pipeline/`** — cada arquivo é uma etapa pura. Recebem inputs tipados (`Transcript`, `Highlight`, `VideoInfo`) e devolvem o próximo. Sem efeitos colaterais além de arquivos em `output/`. Etapas novas são compostas dentro dos workflows em `app/pipeline/workflows/video.py`.
+- **`app/pipeline/`** — cada arquivo é uma etapa pura. Recebem inputs tipados (`Transcript`, `Highlight`, `VideoInfo`) e devolvem o próximo. Sem efeitos colaterais além de arquivos no `temp_dir` do job. Etapas novas são compostas dentro dos workflows em `app/pipeline/workflows/video.py`.
 - **`app/llm/`** — providers de IA atrás da interface `LLMProvider`. `get_provider(name)` (definido em `app/llm/__init__.py`) é o único ponto de entrada. O `auto` provider tenta Gemini primeiro e cai para Ollama em falha — não chame `GeminiProvider()` direto fora do factory, isso quebra o fallback.
-- **`app/api/`** — FastAPI. `main.py` define rotas, `jobs.py` roda o pipeline em thread separada e publica eventos via `bus` (pub/sub em memória), `schemas.py` são os DTOs Pydantic. O `bus.publish()` é o que alimenta SSE e WebSocket simultaneamente.
-- **`app/db/`** — SQLAlchemy + MySQL. Models em `models.py` (`Job`, `Cut`). Sem migrations (usa `Base.metadata.create_all()` em `init_db()`).
+- **`app/api/`** — FastAPI. `main.py` define rotas e dispara cada workflow em thread separada via `_run_background`. `events.py` tem o `bus` (pub/sub em memória) + helper `emit()`; `schemas.py` são os DTOs Pydantic. O `bus.publish()` é o que alimenta SSE e WebSocket simultaneamente. **Não há banco** — o Laravel é o dono da persistência.
+- **`app/storage/`** — wrapper do MinIO (`MinioStorageProvider`) usado pelos workflows pra subir originals, HLS, cortes e legendas.
 - **`app/support/`** — config (Pydantic Settings lendo `.env`), tipos do domínio, logger.
 
 ### Gemini — rate limiting + cascata
@@ -76,16 +76,26 @@ O `Cutter.cut_dynamic()` renderiza frame-a-frame com OpenCV usando a trajetória
 2. **ffmpeg do `brew install ffmpeg` padrão NÃO tem libass.** O filtro `subtitles` falha com "No such filter". Tem que usar o tap `homebrew-ffmpeg/ffmpeg`.
 3. **Filtro subtitles no ffmpeg 8.1+ exige `subtitles=filename=arquivo.ass`** (não `subtitles=arquivo.ass`). E precisa rodar com `cwd` no diretório do `.ass` para evitar problemas de escape do `:`.
 4. **Fonte para ASS:** usar **`Arial Black`** (libass acha via coretext no macOS). Fontes obscuras tipo Montserrat falham silenciosamente — a legenda fica invisível.
-5. **`yt-dlp` pode bloquear com "Sign in to confirm you're not a bot"** quando bate muito. Por isso o `Downloader` extrai `video_id` da URL e prioriza cache local (`output/<id>/source.*` + `meta.json`) antes de bater no YouTube.
+5. **`yt-dlp` pode bloquear com "Sign in to confirm you're not a bot"** quando bate muito. Por isso o `Downloader` extrai `video_id` da URL e prioriza cache local (`<temp_dir do job>/<id>/source.*` + `meta.json`) antes de bater no YouTube.
 6. **`.venv` pode ter shebang antigo apontando para `python/.venv/`** (antes da reorganização). Use `.venv/bin/python -m pip` se `.venv/bin/pip` falhar com "bad interpreter".
 7. **Cortes obrigatoriamente entre 60s e 80s** (1:00 a 1:20). Configurável em `MIN_CUT_DURATION`/`MAX_CUT_DURATION` do `.env` mas esse é o range pedido pelo usuário; não mudar default sem ser solicitado.
+8. **MediaPipe GPU delegate (Metal) aborta o processo no macOS.** Criar o `FaceDetector`/`FaceLandmarker` com `delegate=GPU` funciona, mas no primeiro `.detect()` o `FaceLandmarker` faz `abort()` em C++ (`unsupported ImageFrame format`) — crash **não capturável** por try/except, derruba a API. Por isso `FACE_TRACKING_DELEGATE=auto` mapeia pra **CPU**; `gpu` é opt-in com aviso. O ganho de GPU vem do ffmpeg (VideoToolbox), não do face tracking.
+
+### Aceleração por GPU (Apple Silicon / VideoToolbox)
+
+O pipeline empurra o processamento de vídeo pra GPU do Mac via ffmpeg VideoToolbox, centralizado em `app/support/ffmpeg.py`:
+- **Encode**: `build_video_encode_profile()` já usa `h264_videotoolbox` no macOS (`FFMPEG_ENCODER=auto`).
+- **Decode**: `build_decode_args()` injeta `-hwaccel videotoolbox` antes do `-i` em todos os comandos de decode (`FFMPEG_HWACCEL=auto`). Sem `-hwaccel_output_format` de propósito, pra os frames voltarem à memória e o filtro `subtitles`/libass continuar funcionando.
+- **Corte dinâmico**: `Cutter._cut_dynamic()` manda os frames croppados do OpenCV **crus (bgr24) direto ao encoder de hardware via `pipe:0`** e muxa o áudio no mesmo passo — `run_with_progress(..., stdin_frames=...)`. Não existe mais o arquivo intermediário `.novideo.mp4` em mp4v (software) nem o double-encode. **Não** reintroduza o `cv2.VideoWriter`.
+- **Transcrição**: `app/pipeline/transcriber.py` tem dois backends (`WHISPER_BACKEND=auto|mlx|faster`). `auto` usa **`mlx-whisper`** (GPU Metal) no macOS Apple Silicon quando instalado, senão `faster-whisper` (CTranslate2, só CPU/CUDA — não tem Metal). O `mlx-whisper` está nas deps com marker `sys_platform == 'darwin' and platform_machine == 'arm64'`, então o CI Linux ignora; o import é lazy dentro do método pra não quebrar fora do Mac. MLX 0.4.x **não tem beam search** (usa greedy `temperature=0`) nem `vad_filter` — a supressão de alucinação fica com os thresholds `no_speech`/`logprob`/`compression_ratio`. Mapa modelo→repo MLX em `_MLX_MODEL_REPOS`; override via `WHISPER_MLX_MODEL`.
 
 ### Persistência
 
-Estado vive em duas camadas:
-- **`output/<youtube_id>/`** — arquivos físicos (vídeo, áudio, transcripts, cortes, .ass, .json). Serve de cache: existência do `source.*` + `meta.json` pula o download.
-- **MySQL** — tabelas `jobs` (status, progresso, webhook config, payload do resultado) e `cuts` (uma row por corte gerado). Usado pela API para histórico e SSE snapshots iniciais.
+A API é **stateless** — nada de banco. Estado de job vive só em memória durante a execução:
+- **`settings.temp_dir/<job_id>/`** — arquivos efêmeros (vídeo baixado, áudio, transcripts, cortes, .ass). Limpo no `finally` de cada workflow. Dentro disso o `Downloader` cacheia por `<youtube_id>`: existência do `source.*` + `meta.json` pula o download.
+- **MinIO** — artefatos duráveis (originals, HLS, cortes legendados). É o que o Laravel consome.
+- **`bus`** (`app/api/events.py`) — pub/sub em memória do progresso. Mantém o último snapshot por job pra clientes SSE/WS que conectam tarde.
 
 ### Webhook
 
-Quando `webhook_url` é fornecido na criação do job, ao final do pipeline o `_fire_webhook()` em `app/api/jobs.py` faz POST do payload com `{job_id, success, result, error}`. O header de auth é configurável (`webhook_header` no payload do job, default `Authorization`) — útil porque cada cliente usa um nome diferente (Authorization, X-API-Key, X-Webhook-Token, etc).
+Quando `callback_url` vem no payload do job, ao final do workflow o `_post_webhook()` em `app/pipeline/workflows/video.py` faz POST do resultado completo (com `event`, `status`, `files`, `payloads`, etc.). O header de auth é configurável (`callback_header` no payload, default `Authorization`) — útil porque cada cliente usa um nome diferente (Authorization, X-API-Key, X-Webhook-Token, etc.). Em falha, loga warning e segue (a menos que `WEBHOOK_FAIL_JOB_ON_ERROR=true`).

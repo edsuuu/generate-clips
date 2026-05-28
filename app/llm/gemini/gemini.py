@@ -20,8 +20,6 @@ from app.llm.gemini.rate_limit import limiter
 from app.support.config import settings
 from app.support.logger import logger
 
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-
 
 def _estimate_tokens(text: str) -> int:
     """Heurística: 1 token ≈ 4 chars (válido para PT-BR/EN)."""
@@ -118,7 +116,7 @@ class GeminiProvider(LLMProvider):
         return self.models[start:] + self.models[:start]
 
     def _call(self, model: str, system: str, user: str, *, json_mode: bool) -> str:
-        url = f"{BASE_URL}/models/{model}:generateContent"
+        url = f"{settings.gemini_base_url}/models/{model}:generateContent"
 
         generation_config: dict = {"temperature": 0.3}
         if json_mode:

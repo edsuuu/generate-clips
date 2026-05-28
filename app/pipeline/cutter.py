@@ -7,15 +7,16 @@ Suporta dois modos:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cv2  # type: ignore
 import numpy as np
 
-from app.support.ffmpeg import build_video_encode_profile, run_with_progress
+from app.support.ffmpeg import build_decode_args, build_video_encode_profile, run_with_progress
 from app.support.logger import logger
-from app.support.types import CropTrajectory, Cut, Highlight, VideoInfo
+from app.support.types import CropTrajectory, Highlight
 
 if TYPE_CHECKING:
     from app.pipeline.face_tracker import FaceTracker
@@ -36,15 +37,7 @@ class Cutter:
         self.vertical = vertical
         self.face_tracker = face_tracker
         self.encode_profile = build_video_encode_profile()
-
-    def cut_all(self, video: VideoInfo, highlights: list[Highlight]) -> list[Cut]:
-        cuts: list[Cut] = []
-        for i, h in enumerate(highlights, start=1):
-            name = f"PT{i}"
-            out_path = self.output_dir / f"{name}.mp4"
-            self._cut_one(video.file_path, h, out_path)
-            cuts.append(Cut(index=i, name=name, highlight=h, video_path=out_path))
-        return cuts
+        self.decode_args = build_decode_args()
 
     def _cut_one(self, source: Path, highlight: Highlight, out_path: Path) -> None:
         logger.info(
@@ -72,6 +65,7 @@ class Cutter:
         cmd = [
             "ffmpeg",
             "-y",
+            *self.decode_args,
             "-ss",
             f"{highlight.start:.3f}",
             "-i",
@@ -102,6 +96,7 @@ class Cutter:
         cmd = [
             "ffmpeg",
             "-y",
+            *self.decode_args,
             "-ss",
             f"{highlight.start:.3f}",
             "-i",
@@ -133,7 +128,12 @@ class Cutter:
         out_path: Path,
         trajectory: CropTrajectory,
     ) -> None:
-        """Renderiza frame-a-frame com crop seguindo a trajetória do speaker."""
+        """Renderiza frame-a-frame com crop seguindo a trajetória do speaker.
+
+        Os frames croppados são enviados crus (bgr24) direto ao encoder de
+        hardware via pipe, e o áudio original é muxado no mesmo passo. Sem
+        arquivo intermediário nem encode em software (o antigo mp4v).
+        """
         cap = cv2.VideoCapture(str(source))
         if not cap.isOpened():
             raise RuntimeError(f"Não foi possível abrir {source}")
@@ -153,40 +153,47 @@ class Cutter:
             crop_w = src_w
             crop_h = int(round(crop_w * TARGET_H / TARGET_W))
 
-        # Escreve frames em arquivo temporário (sem áudio); depois faz mux com ffmpeg.
-        tmp_video = out_path.with_suffix(".novideo.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
-        writer = cv2.VideoWriter(str(tmp_video), fourcc, fps, (TARGET_W, TARGET_H))
-
         start_frame = int(highlight.start * fps)
         end_frame = int(highlight.end * fps)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        frame_idx = start_frame
-        while frame_idx < end_frame:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            t = frame_idx / fps  # tempo absoluto no vídeo
-            cx, cy = trajectory.value_at(t)
+        def frames() -> Iterator[bytes]:
+            frame_idx = start_frame
+            try:
+                while frame_idx < end_frame:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    t = frame_idx / fps  # tempo absoluto no vídeo
+                    cx, cy = trajectory.value_at(t)
 
-            x = int(np.clip(cx - crop_w // 2, 0, src_w - crop_w))
-            y = int(np.clip(cy - crop_h // 2, 0, src_h - crop_h))
+                    x = int(np.clip(cx - crop_w // 2, 0, src_w - crop_w))
+                    y = int(np.clip(cy - crop_h // 2, 0, src_h - crop_h))
 
-            cropped = frame[y : y + crop_h, x : x + crop_w]
-            resized = cv2.resize(cropped, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LANCZOS4)
-            writer.write(resized)
-            frame_idx += 1
+                    cropped = frame[y : y + crop_h, x : x + crop_w]
+                    resized = cv2.resize(
+                        cropped, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LANCZOS4
+                    )
+                    yield np.ascontiguousarray(resized).tobytes()
+                    frame_idx += 1
+            finally:
+                cap.release()
 
-        writer.release()
-        cap.release()
-
-        # Mux do áudio original com o vídeo croppado e re-encode para H.264.
+        # Entrada 0: vídeo cru vindo do pipe (frames croppados).
+        # Entrada 1: source original só para o áudio.
         cmd = [
             "ffmpeg",
             "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{TARGET_W}x{TARGET_H}",
+            "-r",
+            f"{fps:.6f}",
             "-i",
-            str(tmp_video),
+            "pipe:0",
             "-ss",
             f"{highlight.start:.3f}",
             "-i",
@@ -207,12 +214,10 @@ class Cutter:
             "+faststart",
             str(out_path),
         ]
-        try:
-            run_with_progress(
-                cmd,
-                total_seconds=highlight.duration,
-                encoder=self.encode_profile.encoder,
-                stage="cut-dynamic-mux",
-            )
-        finally:
-            tmp_video.unlink(missing_ok=True)
+        run_with_progress(
+            cmd,
+            total_seconds=highlight.duration,
+            encoder=self.encode_profile.encoder,
+            stage="cut-dynamic",
+            stdin_frames=frames(),
+        )

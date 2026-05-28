@@ -20,18 +20,23 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-flash-latest"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
 
     whisper_model: str = "large-v3"
+    # Engine: auto | mlx | faster. auto = MLX (GPU Metal) no macOS Apple Silicon
+    # com mlx-whisper instalado; senão faster-whisper (CPU/CUDA).
+    whisper_backend: str = "auto"
+    # Override do repo MLX (HF). Vazio = deriva de whisper_model.
+    whisper_mlx_model: str = ""
     whisper_device: str = "auto"
     whisper_compute_type: str = "auto"
     whisper_language: str = "pt"
     whisper_beam_size: int = 10
     whisper_initial_prompt: str = ""
 
-    output_dir: Path = Path("./output")
     temp_dir: Path = Path("/tmp/auto-post")
     storage_disk: str = "minio"
     minio_endpoint: str = "http://127.0.0.1:9000"
@@ -49,12 +54,10 @@ class Settings(BaseSettings):
 
     face_tracking_enabled: bool = True
     face_tracking_sample_fps: int = 6
-
-    db_host: str = "127.0.0.1"
-    db_port: int = 3306
-    db_database: str = "auto_post"
-    db_user: str = "root"
-    db_password: str = "root"
+    # Delegate de inferência do MediaPipe: auto | gpu | cpu.
+    # auto/cpu = CPU. gpu = Metal (opt-in; aborta o processo no macOS por bug do
+    # MediaPipe no FaceLandmarker). O ganho de GPU do pipeline vem do ffmpeg.
+    face_tracking_delegate: str = "auto"
 
     api_host: str = "0.0.0.0"
     api_port: int = 8765
@@ -62,18 +65,14 @@ class Settings(BaseSettings):
     webhook_fail_job_on_error: bool = False
 
     ffmpeg_encoder: str = "auto"
+    # Aceleração de decode por hardware: auto | none | videotoolbox | <nome ffmpeg>.
+    # auto = videotoolbox no macOS quando disponível; offload do decode para a GPU.
+    ffmpeg_hwaccel: str = "auto"
     ffmpeg_crf: int = 23
     ffmpeg_preset: str = "veryfast"
     ffmpeg_video_bitrate: str = "5M"
     ffmpeg_nvenc_preset: str = "p4"
     ffmpeg_max_concurrent_renders: int = 1
-
-    @property
-    def database_url(self) -> str:
-        return (
-            f"mysql+pymysql://{self.db_user}:{self.db_password}"
-            f"@{self.db_host}:{self.db_port}/{self.db_database}?charset=utf8mb4"
-        )
 
 
 settings = Settings()

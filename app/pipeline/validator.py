@@ -229,7 +229,7 @@ class TranscriptValidator:
         raise RuntimeError(f"Todos os modelos esgotaram. Último: {last_error}")
 
     def _request_model(self, model: str, payload_base: dict) -> dict:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        url = f"{settings.gemini_base_url}/models/{model}:generateContent"
         with httpx.Client(timeout=240.0) as client:
             resp = client.post(
                 url,

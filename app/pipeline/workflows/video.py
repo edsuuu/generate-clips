@@ -207,14 +207,14 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
             )
 
             emit(job_id, "hls", 32, "Empacotando vídeo em HLS...")
-            hls_package = HlsPackager().package(
+            hls_dir = HlsPackager().package(
                 video.file_path,
                 temp_dir / "hls",
                 total_seconds=video.duration,
                 on_progress=lambda p: emit(job_id, "hls", 32 + p * 0.13, "Gerando HLS..."),
             )
             emit(job_id, "upload", 46, "Enviando HLS ao MinIO...")
-            files.append(_upload_hls_package(storage, payload.video_id, hls_package.output_dir))
+            files.append(_upload_hls_package(storage, payload.video_id, hls_dir))
 
         transcript = None
         validated = None
@@ -335,7 +335,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             on_progress=lambda p: emit(job_id, "subtitle", 40 + p * 0.55, "Queimando legendas..."),
         )
         emit(job_id, "hls", 95, "Empacotando vídeo legendado em HLS...")
-        hls_package = HlsPackager().package(
+        hls_dir = HlsPackager().package(
             out_path,
             temp_dir / "hls",
             total_seconds=transcript.duration,
@@ -349,9 +349,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             file_type="legendado",
             content_type="video/mp4",
         ).to_dict()
-        hls_master = _upload_hls_package(
-            storage, video_id, hls_package.output_dir, prefix="hls-subtitled"
-        )
+        hls_master = _upload_hls_package(storage, video_id, hls_dir, prefix="hls-subtitled")
         result = {
             "job_id": job_id,
             "video_id": video_id,
@@ -514,14 +512,13 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
 
             if metadata_gen is not None:
                 try:
-                    meta = metadata_gen.generate(
-                        video_title,
-                        transcript,
-                        Highlight(start=cut.start_seconds, end=cut.end_seconds),
+                    stored.update(
+                        metadata_gen.generate(
+                            video_title,
+                            transcript,
+                            Highlight(start=cut.start_seconds, end=cut.end_seconds),
+                        )
                     )
-                    stored["title"] = meta.title
-                    stored["description"] = meta.description
-                    stored["hashtags"] = meta.hashtags
                 except Exception as exc:
                     logger.warning(f"Metadados do corte {cut.name} falharam: {exc}")
 
