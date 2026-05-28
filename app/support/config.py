@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o"
 
     whisper_model: str = "large-v3"
+    # Engine: auto | mlx | faster. auto = MLX (GPU Metal) no macOS Apple Silicon
+    # com mlx-whisper instalado; senão faster-whisper (CPU/CUDA).
+    whisper_backend: str = "auto"
+    # Override do repo MLX (HF). Vazio = deriva de whisper_model.
+    whisper_mlx_model: str = ""
     whisper_device: str = "auto"
     whisper_compute_type: str = "auto"
     whisper_language: str = "pt"
@@ -49,6 +54,10 @@ class Settings(BaseSettings):
 
     face_tracking_enabled: bool = True
     face_tracking_sample_fps: int = 6
+    # Delegate de inferência do MediaPipe: auto | gpu | cpu.
+    # auto/cpu = CPU. gpu = Metal (opt-in; aborta o processo no macOS por bug do
+    # MediaPipe no FaceLandmarker). O ganho de GPU do pipeline vem do ffmpeg.
+    face_tracking_delegate: str = "auto"
 
     db_host: str = "127.0.0.1"
     db_port: int = 3306
@@ -62,6 +71,9 @@ class Settings(BaseSettings):
     webhook_fail_job_on_error: bool = False
 
     ffmpeg_encoder: str = "auto"
+    # Aceleração de decode por hardware: auto | none | videotoolbox | <nome ffmpeg>.
+    # auto = videotoolbox no macOS quando disponível; offload do decode para a GPU.
+    ffmpeg_hwaccel: str = "auto"
     ffmpeg_crf: int = 23
     ffmpeg_preset: str = "veryfast"
     ffmpeg_video_bitrate: str = "5M"

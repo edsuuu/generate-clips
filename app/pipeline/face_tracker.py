@@ -16,6 +16,7 @@ Estratégia:
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,22 +67,59 @@ class FaceTracker:
                 "Baixe blaze_face_short_range.tflite e face_landmarker.task."
             )
 
+        delegate = self._resolve_delegate()
+        try:
+            self._face_detector, self._face_landmarker = self._build_models(delegate)
+            if delegate == mp_tasks.BaseOptions.Delegate.GPU:
+                logger.info("Face tracking: delegate GPU (Metal) ativo.")
+        except Exception as e:
+            if delegate == mp_tasks.BaseOptions.Delegate.GPU:
+                logger.warning(f"Delegate GPU indisponível ({e}); face tracking caindo para CPU.")
+                self._face_detector, self._face_landmarker = self._build_models(
+                    mp_tasks.BaseOptions.Delegate.CPU
+                )
+            else:
+                raise
+
+    @staticmethod
+    def _resolve_delegate() -> Any:
+        choice = settings.face_tracking_delegate.strip().lower() or "auto"
+        if choice == "gpu":
+            # Opt-in explícito. No wheel de macOS o delegate Metal aborta o
+            # processo no FaceLandmarker ("unsupported ImageFrame format"), um
+            # crash C++ que não dá pra capturar — use por sua conta e risco.
+            if platform.system() == "Darwin":
+                logger.warning(
+                    "FACE_TRACKING_DELEGATE=gpu no macOS pode abortar o processo "
+                    "(bug do MediaPipe). Em caso de crash, volte para 'cpu'."
+                )
+            return mp_tasks.BaseOptions.Delegate.GPU
+        # auto e cpu => CPU. auto não usa GPU no macOS por causa do crash acima;
+        # o ganho de GPU do pipeline vem do encode/decode VideoToolbox no ffmpeg.
+        return mp_tasks.BaseOptions.Delegate.CPU
+
+    def _build_models(self, delegate: Any) -> tuple[Any, Any]:
         fd_options = mp_vision.FaceDetectorOptions(
-            base_options=mp_tasks.BaseOptions(model_asset_path=str(FACE_DETECTOR_MODEL)),
+            base_options=mp_tasks.BaseOptions(
+                model_asset_path=str(FACE_DETECTOR_MODEL), delegate=delegate
+            ),
             running_mode=mp_vision.RunningMode.IMAGE,
             min_detection_confidence=0.5,
         )
-        self._face_detector = mp_vision.FaceDetector.create_from_options(fd_options)
+        detector = mp_vision.FaceDetector.create_from_options(fd_options)
 
         fl_options = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_tasks.BaseOptions(model_asset_path=str(FACE_LANDMARKER_MODEL)),
+            base_options=mp_tasks.BaseOptions(
+                model_asset_path=str(FACE_LANDMARKER_MODEL), delegate=delegate
+            ),
             running_mode=mp_vision.RunningMode.IMAGE,
             num_faces=4,
             min_face_detection_confidence=0.5,
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        self._face_landmarker = mp_vision.FaceLandmarker.create_from_options(fl_options)
+        landmarker = mp_vision.FaceLandmarker.create_from_options(fl_options)
+        return detector, landmarker
 
     def track_segment(
         self,

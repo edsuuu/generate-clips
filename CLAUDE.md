@@ -79,6 +79,15 @@ O `Cutter.cut_dynamic()` renderiza frame-a-frame com OpenCV usando a trajetória
 5. **`yt-dlp` pode bloquear com "Sign in to confirm you're not a bot"** quando bate muito. Por isso o `Downloader` extrai `video_id` da URL e prioriza cache local (`output/<id>/source.*` + `meta.json`) antes de bater no YouTube.
 6. **`.venv` pode ter shebang antigo apontando para `python/.venv/`** (antes da reorganização). Use `.venv/bin/python -m pip` se `.venv/bin/pip` falhar com "bad interpreter".
 7. **Cortes obrigatoriamente entre 60s e 80s** (1:00 a 1:20). Configurável em `MIN_CUT_DURATION`/`MAX_CUT_DURATION` do `.env` mas esse é o range pedido pelo usuário; não mudar default sem ser solicitado.
+8. **MediaPipe GPU delegate (Metal) aborta o processo no macOS.** Criar o `FaceDetector`/`FaceLandmarker` com `delegate=GPU` funciona, mas no primeiro `.detect()` o `FaceLandmarker` faz `abort()` em C++ (`unsupported ImageFrame format`) — crash **não capturável** por try/except, derruba a API. Por isso `FACE_TRACKING_DELEGATE=auto` mapeia pra **CPU**; `gpu` é opt-in com aviso. O ganho de GPU vem do ffmpeg (VideoToolbox), não do face tracking.
+
+### Aceleração por GPU (Apple Silicon / VideoToolbox)
+
+O pipeline empurra o processamento de vídeo pra GPU do Mac via ffmpeg VideoToolbox, centralizado em `app/support/ffmpeg.py`:
+- **Encode**: `build_video_encode_profile()` já usa `h264_videotoolbox` no macOS (`FFMPEG_ENCODER=auto`).
+- **Decode**: `build_decode_args()` injeta `-hwaccel videotoolbox` antes do `-i` em todos os comandos de decode (`FFMPEG_HWACCEL=auto`). Sem `-hwaccel_output_format` de propósito, pra os frames voltarem à memória e o filtro `subtitles`/libass continuar funcionando.
+- **Corte dinâmico**: `Cutter._cut_dynamic()` manda os frames croppados do OpenCV **crus (bgr24) direto ao encoder de hardware via `pipe:0`** e muxa o áudio no mesmo passo — `run_with_progress(..., stdin_frames=...)`. Não existe mais o arquivo intermediário `.novideo.mp4` em mp4v (software) nem o double-encode. **Não** reintroduza o `cv2.VideoWriter`.
+- **Transcrição**: `app/pipeline/transcriber.py` tem dois backends (`WHISPER_BACKEND=auto|mlx|faster`). `auto` usa **`mlx-whisper`** (GPU Metal) no macOS Apple Silicon quando instalado, senão `faster-whisper` (CTranslate2, só CPU/CUDA — não tem Metal). O `mlx-whisper` está nas deps com marker `sys_platform == 'darwin' and platform_machine == 'arm64'`, então o CI Linux ignora; o import é lazy dentro do método pra não quebrar fora do Mac. MLX 0.4.x **não tem beam search** (usa greedy `temperature=0`) nem `vad_filter` — a supressão de alucinação fica com os thresholds `no_speech`/`logprob`/`compression_ratio`. Mapa modelo→repo MLX em `_MLX_MODEL_REPOS`; override via `WHISPER_MLX_MODEL`.
 
 ### Persistência
 

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.support.ffmpeg import build_video_encode_profile, run_with_progress
+from app.support.ffmpeg import build_decode_args, build_video_encode_profile, run_with_progress
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class HlsPackager:
         cmd = [
             "ffmpeg",
             "-y",
+            *build_decode_args(),
             "-i",
             str(source_path),
             *profile.args,

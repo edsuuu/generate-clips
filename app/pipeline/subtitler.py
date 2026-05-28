@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 
-from app.support.ffmpeg import build_video_encode_profile, run_with_progress
+from app.support.ffmpeg import build_decode_args, build_video_encode_profile, run_with_progress
 from app.support.logger import logger
 from app.support.types import Highlight, Transcript, Word
 
@@ -129,6 +129,7 @@ class Subtitler:
         cmd = [
             "ffmpeg",
             "-y",
+            *build_decode_args(),
             "-i",
             video_path.name,
             "-vf",

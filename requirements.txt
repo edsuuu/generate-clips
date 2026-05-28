@@ -1,5 +1,7 @@
 yt-dlp>=2025.1.15
 faster-whisper>=1.1.0
+# Transcrição na GPU (Metal) — instalado só em macOS Apple Silicon; ignorado no resto.
+mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 ffmpeg-python>=0.2.0
 rich>=13.9.0
 pydantic>=2.10.0
