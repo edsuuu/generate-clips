@@ -65,6 +65,11 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.11"
+# Namespace packages (PEP 420 — sem __init__.py). explicit_package_bases evita
+# que app/support/types.py seja interpretado como o stdlib `types`.
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "."
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
