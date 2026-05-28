@@ -41,22 +41,6 @@ class Highlight:
 
 
 @dataclass
-class CutMetadata:
-    title: str
-    description: str
-    hashtags: list[str]
-
-
-@dataclass
-class Cut:
-    index: int
-    name: str  # PT1, PT2, ...
-    highlight: Highlight
-    video_path: Path
-    metadata: CutMetadata | None = None
-
-
-@dataclass
 class VideoInfo:
     url: str
     video_id: str

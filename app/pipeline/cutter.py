@@ -16,7 +16,7 @@ import numpy as np
 
 from app.support.ffmpeg import build_decode_args, build_video_encode_profile, run_with_progress
 from app.support.logger import logger
-from app.support.types import CropTrajectory, Cut, Highlight, VideoInfo
+from app.support.types import CropTrajectory, Highlight
 
 if TYPE_CHECKING:
     from app.pipeline.face_tracker import FaceTracker
@@ -38,15 +38,6 @@ class Cutter:
         self.face_tracker = face_tracker
         self.encode_profile = build_video_encode_profile()
         self.decode_args = build_decode_args()
-
-    def cut_all(self, video: VideoInfo, highlights: list[Highlight]) -> list[Cut]:
-        cuts: list[Cut] = []
-        for i, h in enumerate(highlights, start=1):
-            name = f"PT{i}"
-            out_path = self.output_dir / f"{name}.mp4"
-            self._cut_one(video.file_path, h, out_path)
-            cuts.append(Cut(index=i, name=name, highlight=h, video_path=out_path))
-        return cuts
 
     def _cut_one(self, source: Path, highlight: Highlight, out_path: Path) -> None:
         logger.info(

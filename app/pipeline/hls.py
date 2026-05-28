@@ -1,16 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from app.support.ffmpeg import build_decode_args, build_video_encode_profile, run_with_progress
-
-
-@dataclass(frozen=True)
-class HlsPackage:
-    master_playlist: Path
-    output_dir: Path
 
 
 class HlsPackager:
@@ -20,9 +13,8 @@ class HlsPackager:
         output_dir: Path,
         total_seconds: float,
         on_progress: Callable[[float], object] | None = None,
-    ) -> HlsPackage:
+    ) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
-        master_playlist = output_dir / "master.m3u8"
         profile = build_video_encode_profile()
 
         cmd = [
@@ -58,7 +50,4 @@ class HlsPackager:
             stage="hls",
         )
 
-        return HlsPackage(
-            master_playlist=master_playlist,
-            output_dir=output_dir,
-        )
+        return output_dir

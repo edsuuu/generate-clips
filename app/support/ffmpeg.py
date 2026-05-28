@@ -304,19 +304,29 @@ def run_with_progress(
         writer = _start_frame_writer(proc, stdin_frames) if stdin_frames is not None else None
 
         last_pct = -1.0
+        last_logged_pct = -1.0
         assert proc.stdout is not None
         for raw in proc.stdout:
             line = raw.decode("utf-8", "ignore") if piping else raw
             match = _OUT_TIME_RE.search(line)
-            if match and total_seconds > 0 and on_progress is not None:
+            if match and total_seconds > 0:
                 h, m, s = match.groups()
                 current = int(h) * 3600 + int(m) * 60 + float(s)
                 pct = min(99.0, current / total_seconds * 100.0)
                 if pct - last_pct >= 1.0:
                     last_pct = pct
-                    on_progress(pct)
-            elif line.startswith("progress=end") and on_progress is not None:
-                on_progress(100.0)
+                    if on_progress is not None:
+                        on_progress(pct)
+                if pct - last_logged_pct >= 10.0:
+                    last_logged_pct = pct
+                    logger.info(
+                        f"[ffmpeg:{stage}] progresso={pct:5.1f}% "
+                        f"({current:.1f}s/{total_seconds:.1f}s)"
+                    )
+            elif line.startswith("progress=end"):
+                if on_progress is not None:
+                    on_progress(100.0)
+                logger.info(f"[ffmpeg:{stage}] progresso=100.0%")
 
         if writer is not None:
             writer.join()
