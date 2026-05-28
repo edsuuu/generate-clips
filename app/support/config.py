@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     whisper_beam_size: int = 10
     whisper_initial_prompt: str = ""
 
-    output_dir: Path = Path("./output")
     temp_dir: Path = Path("/tmp/auto-post")
     storage_disk: str = "minio"
     minio_endpoint: str = "http://127.0.0.1:9000"
