@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-flash-latest"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
@@ -58,12 +59,6 @@ class Settings(BaseSettings):
     # MediaPipe no FaceLandmarker). O ganho de GPU do pipeline vem do ffmpeg.
     face_tracking_delegate: str = "auto"
 
-    db_host: str = "127.0.0.1"
-    db_port: int = 3306
-    db_database: str = "auto_post"
-    db_user: str = "root"
-    db_password: str = "root"
-
     api_host: str = "0.0.0.0"
     api_port: int = 8765
     webhook_timeout_seconds: float = 30.0
@@ -78,13 +73,6 @@ class Settings(BaseSettings):
     ffmpeg_video_bitrate: str = "5M"
     ffmpeg_nvenc_preset: str = "p4"
     ffmpeg_max_concurrent_renders: int = 1
-
-    @property
-    def database_url(self) -> str:
-        return (
-            f"mysql+pymysql://{self.db_user}:{self.db_password}"
-            f"@{self.db_host}:{self.db_port}/{self.db_database}?charset=utf8mb4"
-        )
 
 
 settings = Settings()
