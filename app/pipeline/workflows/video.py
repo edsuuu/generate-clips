@@ -349,9 +349,7 @@ def subtitle_full_video(job_id: str, video_id: str, payload: SubtitleFullRequest
             file_type="legendado",
             content_type="video/mp4",
         ).to_dict()
-        hls_master = _upload_hls_package(
-            storage, video_id, hls_dir, prefix="hls-subtitled"
-        )
+        hls_master = _upload_hls_package(storage, video_id, hls_dir, prefix="hls-subtitled")
         result = {
             "job_id": job_id,
             "video_id": video_id,
