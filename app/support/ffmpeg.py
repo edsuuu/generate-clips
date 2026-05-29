@@ -258,6 +258,33 @@ def _start_frame_writer(proc: subprocess.Popen, frames: Iterator[bytes]) -> thre
     return thread
 
 
+def _start_stderr_drainer(proc: subprocess.Popen) -> tuple[threading.Thread, list[bytes]]:
+    """Drena stderr numa thread para evitar deadlock quando o buffer do pipe enche.
+
+    Sem isso, ffmpeg trava esperando alguem ler stderr (ex.: HLS muxer com 60+
+    segmentos enche os 64KB do pipe), enquanto a gente fica preso lendo stdout.
+    """
+    chunks: list[bytes] = []
+
+    def _drain() -> None:
+        if proc.stderr is None:
+            return
+        try:
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk:
+                    break
+                chunks.append(
+                    chunk if isinstance(chunk, bytes) else chunk.encode("utf-8", "ignore")
+                )
+        except (OSError, ValueError):
+            pass
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    return thread, chunks
+
+
 def run_with_progress(
     cmd: list[str],
     total_seconds: float,
@@ -302,6 +329,7 @@ def run_with_progress(
         )
 
         writer = _start_frame_writer(proc, stdin_frames) if stdin_frames is not None else None
+        stderr_thread, stderr_chunks = _start_stderr_drainer(proc)
 
         last_pct = -1.0
         last_logged_pct = -1.0
@@ -331,10 +359,8 @@ def run_with_progress(
         if writer is not None:
             writer.join()
         returncode = proc.wait()
-        stderr_raw = proc.stderr.read() if proc.stderr else ""
-        stderr = (
-            stderr_raw.decode("utf-8", "ignore") if isinstance(stderr_raw, bytes) else stderr_raw
-        )
+        stderr_thread.join(timeout=5.0)
+        stderr = b"".join(stderr_chunks).decode("utf-8", "ignore")
         finished_at = datetime.now().isoformat(timespec="seconds")
         elapsed = time.monotonic() - render_start
 
