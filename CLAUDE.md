@@ -81,6 +81,14 @@ O `Cutter.cut_dynamic()` renderiza frame-a-frame com OpenCV usando a trajetória
 7. **Cortes obrigatoriamente entre 60s e 80s** (1:00 a 1:20). Configurável em `MIN_CUT_DURATION`/`MAX_CUT_DURATION` do `.env` mas esse é o range pedido pelo usuário; não mudar default sem ser solicitado.
 8. **MediaPipe GPU delegate (Metal) aborta o processo no macOS.** Criar o `FaceDetector`/`FaceLandmarker` com `delegate=GPU` funciona, mas no primeiro `.detect()` o `FaceLandmarker` faz `abort()` em C++ (`unsupported ImageFrame format`) — crash **não capturável** por try/except, derruba a API. Por isso `FACE_TRACKING_DELEGATE=auto` mapeia pra **CPU**; `gpu` é opt-in com aviso. O ganho de GPU vem do ffmpeg (VideoToolbox), não do face tracking.
 
+### Aceleração por GPU no Linux/NVIDIA (CUDA)
+
+No Linux com GPU NVIDIA o pipeline roda tudo na GPU:
+- **Encode/Decode**: `FFMPEG_ENCODER=auto` pega `h264_nvenc` (VBR + `-cq`) e `FFMPEG_HWACCEL=auto` injeta `-hwaccel cuda`. Precisa de ffmpeg compilado com nvenc/cuda (`ffmpeg -encoders | grep nvenc`).
+- **Transcrição**: `faster-whisper` (CTranslate2) com `device=cuda`, `compute_type=float16` — detectado automaticamente.
+- **Face tracking**: MediaPipe usa delegate GPU (OpenGL/EGL) no Linux — o crash do delegate Metal é exclusivo do macOS.
+- **Libs CUDA do faster-whisper**: o CTranslate2 carrega `libcublas.so.12`/`libcudnn.so.9` por *soname* via `dlopen` e **não** descobre os wheels `nvidia-*-cu12` sozinho (diferente do PyTorch). Falha com "Library libcublas.so.12 is not found". A correção está em `app/support/cuda_bootstrap.py` (`ensure_cuda_libs()`, chamado no topo do `main.py` antes de qualquer import de ctranslate2): ele coloca os dirs `site-packages/nvidia/*/lib` no `LD_LIBRARY_PATH` e dá **re-exec** do processo (o loader só lê `LD_LIBRARY_PATH` na inicialização — setar em runtime não basta). É idempotente (não entra em loop de re-exec). **Não** remova essa chamada nem instale `faster-whisper` esperando que ele ache as libs sozinho — instale `nvidia-cublas-cu12` e `nvidia-cudnn-cu12` (já no `requirements.txt` com marker Linux/x86_64).
+
 ### Aceleração por GPU (Apple Silicon / VideoToolbox)
 
 O pipeline empurra o processamento de vídeo pra GPU do Mac via ffmpeg VideoToolbox, centralizado em `app/support/ffmpeg.py`:

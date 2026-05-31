@@ -71,7 +71,7 @@ class FaceTracker:
         try:
             self._face_detector, self._face_landmarker = self._build_models(delegate)
             if delegate == mp_tasks.BaseOptions.Delegate.GPU:
-                logger.info("Face tracking: delegate GPU (Metal) ativo.")
+                logger.info("Face tracking: delegate GPU ativo.")
         except Exception as e:
             if delegate == mp_tasks.BaseOptions.Delegate.GPU:
                 logger.warning(f"Delegate GPU indisponível ({e}); face tracking caindo para CPU.")
@@ -85,18 +85,53 @@ class FaceTracker:
     def _resolve_delegate() -> Any:
         choice = settings.face_tracking_delegate.strip().lower() or "auto"
         if choice == "gpu":
-            # Opt-in explícito. No wheel de macOS o delegate Metal aborta o
-            # processo no FaceLandmarker ("unsupported ImageFrame format"), um
-            # crash C++ que não dá pra capturar — use por sua conta e risco.
             if platform.system() == "Darwin":
+                # Delegate Metal aborta o processo no FaceLandmarker com
+                # "unsupported ImageFrame format" — crash C++ não capturável.
                 logger.warning(
                     "FACE_TRACKING_DELEGATE=gpu no macOS pode abortar o processo "
-                    "(bug do MediaPipe). Em caso de crash, volte para 'cpu'."
+                    "(bug do MediaPipe Metal). Em caso de crash, volte para 'cpu'."
                 )
             return mp_tasks.BaseOptions.Delegate.GPU
-        # auto e cpu => CPU. auto não usa GPU no macOS por causa do crash acima;
-        # o ganho de GPU do pipeline vem do encode/decode VideoToolbox no ffmpeg.
+        if choice == "auto":
+            # Só usa GPU quando há sinal real de NVIDIA disponível. Em máquinas
+            # sem GPU dedicada, WSL com llvmpipe ou ambientes com renderer
+            # software, o GPU delegate costuma abortar o processo.
+            if platform.system() != "Darwin" and FaceTracker._has_nvidia_gpu():
+                logger.info("Face tracking: delegate GPU (OpenGL/EGL) ativado automaticamente.")
+                return mp_tasks.BaseOptions.Delegate.GPU
+            logger.info("Face tracking: mantendo CPU no modo auto (GPU não confirmada).")
         return mp_tasks.BaseOptions.Delegate.CPU
+
+    @staticmethod
+    def _has_nvidia_gpu() -> bool:
+        if not FaceTracker._has_gpu_device_nodes():
+            return False
+
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+        if result.returncode != 0:
+            return False
+
+        output = (result.stdout or "").strip().lower()
+        if not output:
+            return False
+        if "no devices were found" in output or "not found" in output:
+            return False
+        return True
+
+    @staticmethod
+    def _has_gpu_device_nodes() -> bool:
+        return Path("/dev/dri").exists() or Path("/dev/nvidia0").exists()
 
     def _build_models(self, delegate: Any) -> tuple[Any, Any]:
         fd_options = mp_vision.FaceDetectorOptions(

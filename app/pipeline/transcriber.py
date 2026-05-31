@@ -52,20 +52,26 @@ def _resolve_mlx_repo() -> str:
     return f"mlx-community/whisper-{name}"
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch  # type: ignore
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        pass
+    try:
+        import ctranslate2  # type: ignore
+        return bool(ctranslate2.get_supported_compute_types("cuda"))
+    except Exception:
+        pass
+    return False
+
+
 def _resolve_device_and_compute() -> tuple[str, str]:
     device = settings.whisper_device
     compute_type = settings.whisper_compute_type
 
     if device == "auto":
-        try:
-            import torch  # type: ignore
-
-            if torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
-        except ImportError:
-            device = "cpu"
+        device = "cuda" if _cuda_available() else "cpu"
 
     if compute_type == "auto":
         compute_type = "float16" if device == "cuda" else "int8"

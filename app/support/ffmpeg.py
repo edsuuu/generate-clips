@@ -37,7 +37,7 @@ def build_video_encode_profile() -> VideoEncodeProfile:
                 encoder="h264_videotoolbox",
                 args=("-c:v", "h264_videotoolbox", "-b:v", settings.ffmpeg_video_bitrate),
             )
-        if platform.system() == "Windows" and _supports_encoder("h264_nvenc"):
+        if _supports_encoder("h264_nvenc"):
             return _nvenc_profile()
         return _libx264_profile()
 
@@ -88,12 +88,13 @@ def _nvenc_profile() -> VideoEncodeProfile:
     return VideoEncodeProfile(
         encoder="h264_nvenc",
         args=(
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            settings.ffmpeg_nvenc_preset,
-            "-b:v",
-            settings.ffmpeg_video_bitrate,
+            "-c:v", "h264_nvenc",
+            "-preset", settings.ffmpeg_nvenc_preset,
+            "-rc:v", "vbr",
+            "-cq:v", str(settings.ffmpeg_nvenc_cq),
+            "-b:v", settings.ffmpeg_video_bitrate,
+            "-maxrate:v", settings.ffmpeg_nvenc_maxrate,
+            "-pix_fmt", "yuv420p",
         ),
     )
 
@@ -165,6 +166,8 @@ def build_decode_args() -> tuple[str, ...]:
     if requested == "auto":
         if platform.system() == "Darwin" and "videotoolbox" in _available_hwaccels():
             return ("-hwaccel", "videotoolbox")
+        if "cuda" in _available_hwaccels():
+            return ("-hwaccel", "cuda")
         return ()
 
     if requested in _available_hwaccels():

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,11 +20,9 @@ from app.api.schemas import (
 )
 from app.llm import get_provider
 from app.pipeline.analyzer import Analyzer
-from app.pipeline.cutter import Cutter
 from app.pipeline.downloader import Downloader
 from app.pipeline.hls import HlsPackager
 from app.pipeline.metadata import MetadataGenerator
-from app.pipeline.subtitler import Subtitler
 from app.pipeline.transcriber import Transcriber
 from app.storage import MinioStorageProvider
 from app.support.config import settings
@@ -183,6 +185,150 @@ def _validate_transcript(audio_path: Path, transcript: Transcript) -> Transcript
     return validator.validate(audio_path, transcript)
 
 
+def _cut_worker_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONFAULTHANDLER", "1")
+    if overrides:
+        env.update(overrides)
+    return env
+
+
+def _render_cut_in_worker(
+    source_path: Path,
+    transcript_path: Path,
+    cut_path: Path,
+    out_path: Path,
+    *,
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "app.pipeline.cut_worker",
+        "--source",
+        str(source_path),
+        "--transcript-json",
+        str(transcript_path),
+        "--cut-json",
+        str(cut_path),
+        "--output",
+        str(out_path),
+    ]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_cut_worker_env(env_overrides),
+    )
+
+
+def _retry_cut_env() -> dict[str, str]:
+    return {
+        "FACE_TRACKING_ENABLED": "false",
+        "FACE_TRACKING_DELEGATE": "cpu",
+        "FFMPEG_HWACCEL": "none",
+        "FFMPEG_ENCODER": "libx264",
+    }
+
+
+def _render_cut_with_retry(
+    source_path: Path,
+    transcript_path: Path,
+    cut_data: dict[str, Any],
+    out_path: Path,
+    *,
+    force_safe_mode: bool = False,
+) -> bool:
+    cut_path = out_path.with_suffix(".cut.json")
+    cut_path.write_text(json.dumps(cut_data), encoding="utf-8")
+
+    attempts: list[tuple[str, dict[str, str] | None]]
+    if force_safe_mode:
+        attempts = [("safe", _retry_cut_env())]
+    else:
+        attempts = [("normal", None), ("safe", _retry_cut_env())]
+
+    last_result: subprocess.CompletedProcess[str] | None = None
+    try:
+        for attempt_index, (label, overrides) in enumerate(attempts, start=1):
+            out_path.unlink(missing_ok=True)
+            result = _render_cut_in_worker(
+                source_path,
+                transcript_path,
+                cut_path,
+                out_path,
+                env_overrides=overrides,
+            )
+            last_result = result
+
+            if result.returncode == 0 and out_path.exists():
+                return force_safe_mode or attempt_index > 1
+
+            crash_info = f"code {result.returncode}"
+            if result.returncode < 0:
+                crash_info = f"sinal {-result.returncode}"
+            logger.warning(
+                f"Worker do corte falhou ({label}, {crash_info}). "
+                f"{'Reiniciando em modo seguro...' if attempt_index == 1 else 'Sem novas tentativas.'}"
+            )
+            if result.stdout.strip():
+                logger.warning(f"[cut-worker stdout] {result.stdout.strip()[-2000:]}")
+            if result.stderr.strip():
+                logger.warning(f"[cut-worker stderr] {result.stderr.strip()[-2000:]}")
+            if attempt_index == 1 and not force_safe_mode:
+                logger.warning(
+                    "O restante dos cortes deste job será renderizado em modo seguro."
+                )
+
+        stderr = ""
+        if last_result is not None and last_result.stderr:
+            stderr = last_result.stderr.strip()
+        raise RuntimeError(
+            f"Falha ao renderizar corte {cut_data.get('name')!r} após 2 tentativas. "
+            f"{stderr[-1500:]}"
+        )
+    finally:
+        cut_path.unlink(missing_ok=True)
+
+
+def _generate_thumbnail(
+    video_path: Path,
+    video_id: str,
+    duration: float,
+    storage: MinioStorageProvider,
+    temp_dir: Path,
+) -> dict[str, Any] | None:
+    """Extrai um frame do vídeo e sobe para o MinIO como thumbnail JPEG."""
+    seek = min(2.0, max(0.0, duration * 0.05))
+    thumb_local = temp_dir / "thumbnail_cover.jpg"
+    object_path = _object_path(video_id, "thumbnail/cover.jpg")
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel", "error",
+            "-ss", f"{seek:.3f}",
+            "-i", str(video_path),
+            "-frames:v", "1",
+            "-vf", "scale=960:-2",
+            "-q:v", "2",
+            str(thumb_local),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0 or not thumb_local.exists():
+            logger.warning(f"Thumbnail: ffmpeg falhou — {result.stderr.strip()[:300]}")
+            return None
+        stored = storage.upload_file(
+            thumb_local, object_path, file_type="thumbnail", content_type="image/jpeg"
+        )
+        return stored.to_dict()
+    except Exception as exc:
+        logger.warning(f"Thumbnail: falha ignorada — {exc}")
+        return None
+    finally:
+        thumb_local.unlink(missing_ok=True)
+
+
 def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
     logger.info(f"[ingest {job_id}] video_id={payload.video_id} url={payload.url}")
     temp_dir = _job_temp_dir(job_id)
@@ -205,6 +351,13 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
             files.append(
                 storage.upload_file(video.file_path, original_path, file_type="original").to_dict()
             )
+
+            emit(job_id, "thumbnail", 29, "Gerando thumbnail...")
+            thumb = _generate_thumbnail(
+                video.file_path, payload.video_id, video.duration, storage, temp_dir
+            )
+            if thumb:
+                files.append(thumb)
 
             emit(job_id, "hls", 32, "Empacotando vídeo em HLS...")
             hls_dir = HlsPackager().package(
@@ -268,8 +421,8 @@ def ingest_video(job_id: str, payload: IngestVideoRequest) -> dict[str, Any]:
             "job_id": job_id,
             "video_id": payload.video_id,
             "event": "ingest.completed",
-            "status": "waiting_transcript_review" if transcript else "downloaded",
-            "message": "Transcricao finalizada aguardando revisao"
+            "status": "waiting_cuts" if transcript else "downloaded",
+            "message": "Transcricao finalizada, pronto para cortes"
             if transcript
             else "Download finalizado",
             "video": {
@@ -454,20 +607,12 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
             except Exception as exc:
                 logger.warning(f"MetadataGenerator indisponível ({exc}); cortes sem metadados")
 
-        # Reaproveita um único FaceTracker entre cortes (carregar modelos é caro).
-        face_tracker = None
-        if (
-            any(c.vertical and c.face_tracking for c in payload.cuts)
-            and settings.face_tracking_enabled
-        ):
-            try:
-                from app.pipeline.face_tracker import FaceTracker
-
-                face_tracker = FaceTracker()
-            except Exception as exc:
-                logger.warning(f"FaceTracker indisponivel ({exc}); usando crop estatico")
-
         total = len(payload.cuts)
+        transcript_payload = _transcript_to_payload(transcript)
+        transcript_path = temp_dir / "transcript.json"
+        transcript_path.write_text(json.dumps(transcript_payload), encoding="utf-8")
+        force_safe_mode = False
+        failed_cuts: list[str] = []
         for idx, cut in enumerate(payload.cuts, start=1):
             logger.info(
                 f"Renderizando corte {cut.name} ({cut.start_seconds:.1f}s-{cut.end_seconds:.1f}s)"
@@ -481,26 +626,21 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
                 total=total,
             )
             out_path = out_dir / f"{cut.type}.mp4"
-            cutter = Cutter(
-                output_dir=out_dir,
-                vertical=cut.vertical,
-                face_tracker=face_tracker if cut.face_tracking else None,
-            )
-            cutter._cut_one(
-                source_path,
-                Highlight(start=cut.start_seconds, end=cut.end_seconds),
-                out_path,
-            )
-
-            subtitled_path = out_dir / f"{cut.type}.subtitled.mp4"
-            Subtitler().burn_subtitles(
-                out_path,
-                transcript,
-                Highlight(start=cut.start_seconds, end=cut.end_seconds),
-                subtitled_path,
-            )
-            out_path.unlink(missing_ok=True)
-            subtitled_path.rename(out_path)
+            try:
+                force_safe_mode = _render_cut_with_retry(
+                    source_path,
+                    transcript_path,
+                    cut.model_dump(),
+                    out_path,
+                    force_safe_mode=force_safe_mode,
+                )
+            except Exception as cut_exc:
+                logger.error(
+                    f"Corte {cut.name} falhou após todas as tentativas e será ignorado: {cut_exc}"
+                )
+                failed_cuts.append(cut.name)
+                force_safe_mode = True  # cortes restantes em modo seguro
+                continue
 
             stored = storage.upload_file(
                 out_path,
@@ -509,8 +649,17 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
                 content_type="video/mp4",
             ).to_dict()
             stored["cut_id"] = cut.cut_id
+            out_path.unlink(missing_ok=True)
 
-            if metadata_gen is not None:
+            # Metadados: propaga os existentes (re-render) sem chamar a IA;
+            # só gera via IA se o corte ainda não tiver título nem descrição.
+            has_existing_meta = bool((cut.title or "").strip() or (cut.description or "").strip())
+            if has_existing_meta:
+                stored["title"] = cut.title or ""
+                stored["description"] = cut.description or ""
+                stored["hashtags"] = cut.hashtags or []
+                logger.info(f"Metadados do corte {cut.name} reaproveitados (re-render).")
+            elif metadata_gen is not None:
                 try:
                     stored.update(
                         metadata_gen.generate(
@@ -524,13 +673,21 @@ def render_cuts(job_id: str, video_id: str, payload: RenderCutsRequest) -> dict[
 
             files.append(stored)
 
+        if failed_cuts:
+            logger.warning(f"Cortes que falharam e foram ignorados: {', '.join(failed_cuts)}")
+
+        status = "completed" if not failed_cuts else "completed_partial"
+        message = "Cortes renderizados" if not failed_cuts else (
+            f"Cortes renderizados com falhas: {', '.join(failed_cuts)} não foram gerados"
+        )
         result = {
             "job_id": job_id,
             "video_id": video_id,
             "event": "render_cuts.completed",
-            "status": "completed",
-            "message": "Cortes renderizados",
+            "status": status,
+            "message": message,
             "files": files,
+            "failed_cuts": failed_cuts,
             "payloads": [{"type": "render_result", "payload": {"files": files}}],
         }
         emit(job_id, "done", 100, "Cortes renderizados")

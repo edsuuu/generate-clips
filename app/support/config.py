@@ -55,8 +55,8 @@ class Settings(BaseSettings):
     face_tracking_enabled: bool = True
     face_tracking_sample_fps: int = 6
     # Delegate de inferência do MediaPipe: auto | gpu | cpu.
-    # auto/cpu = CPU. gpu = Metal (opt-in; aborta o processo no macOS por bug do
-    # MediaPipe no FaceLandmarker). O ganho de GPU do pipeline vem do ffmpeg.
+    # auto = GPU (OpenGL/EGL) no Linux/Windows com NVIDIA; CPU no macOS (Metal
+    # aborta o processo no FaceLandmarker — bug não corrigido no wheel do pip).
     face_tracking_delegate: str = "auto"
 
     api_host: str = "0.0.0.0"
@@ -65,13 +65,17 @@ class Settings(BaseSettings):
     webhook_fail_job_on_error: bool = False
 
     ffmpeg_encoder: str = "auto"
-    # Aceleração de decode por hardware: auto | none | videotoolbox | <nome ffmpeg>.
-    # auto = videotoolbox no macOS quando disponível; offload do decode para a GPU.
+    # Aceleração de decode por hardware: auto | none | videotoolbox | cuda | <nome ffmpeg>.
+    # auto = videotoolbox no macOS; cuda no Linux/Windows com NVIDIA.
     ffmpeg_hwaccel: str = "auto"
     ffmpeg_crf: int = 23
     ffmpeg_preset: str = "veryfast"
     ffmpeg_video_bitrate: str = "5M"
     ffmpeg_nvenc_preset: str = "p4"
+    # h264_nvenc: quality control em modo VBR (0-51, menor = melhor qualidade; 20 ≈ CRF 23 libx264)
+    ffmpeg_nvenc_cq: int = 20
+    # h264_nvenc: bitrate máximo no modo VBR (evita picos excessivos)
+    ffmpeg_nvenc_maxrate: str = "8M"
     ffmpeg_max_concurrent_renders: int = 1
 
 

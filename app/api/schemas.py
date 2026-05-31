@@ -75,6 +75,10 @@ class RenderCutRequest(BaseModel):
     vertical: bool = True
     face_tracking: bool = True
     output_path: str
+    # Metadados já gerados em render anterior — se presentes, a IA não é chamada novamente.
+    title: str | None = None
+    description: str | None = None
+    hashtags: list[str] | None = None
 
 
 class RenderCutsRequest(CallbackMixin):

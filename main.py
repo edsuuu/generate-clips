@@ -13,6 +13,12 @@ from __future__ import annotations
 
 import os
 
+# Antes de qualquer import que toque ctranslate2/faster-whisper: garante que as
+# libs CUDA dos wheels nvidia-*-cu12 fiquem no LD_LIBRARY_PATH (pode re-exec).
+from app.support.cuda_bootstrap import ensure_cuda_libs
+
+ensure_cuda_libs()
+
 import uvicorn
 
 from app.support.config import settings

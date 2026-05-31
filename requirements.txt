@@ -2,6 +2,11 @@ yt-dlp>=2025.1.15
 faster-whisper>=1.1.0
 # Transcrição na GPU (Metal) — instalado só em macOS Apple Silicon; ignorado no resto.
 mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
+# Transcrição na GPU (CUDA) no Linux/NVIDIA: o ctranslate2 carrega libcublas.so.12
+# e libcudnn.so.9 por soname. Estes wheels fornecem essas libs; o
+# app/support/cuda_bootstrap.py as injeta no LD_LIBRARY_PATH em runtime.
+nvidia-cublas-cu12; sys_platform == "linux" and platform_machine == "x86_64"
+nvidia-cudnn-cu12; sys_platform == "linux" and platform_machine == "x86_64"
 ffmpeg-python>=0.2.0
 rich>=13.9.0
 pydantic>=2.10.0
