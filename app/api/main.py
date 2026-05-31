@@ -52,6 +52,7 @@ app.add_middleware(
 
 
 @app.get("/health")
+@app.get("/heart")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 

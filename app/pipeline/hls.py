@@ -32,10 +32,17 @@ class HlsPackager:
             "2",
             "-ar",
             "48000",
+            # Força keyframe a cada 4s para o HLS conseguir cortar segmentos
+            # realmente curtos. Sem isso o ffmpeg estende o segmento até o próximo
+            # keyframe natural, gerando .ts gigantes (lento em rede distante).
+            "-force_key_frames",
+            "expr:gte(t,n_forced*4)",
             "-hls_time",
             "4",
             "-hls_playlist_type",
             "vod",
+            "-hls_flags",
+            "independent_segments",
             "-hls_segment_filename",
             "segment_%03d.ts",
             "master.m3u8",
